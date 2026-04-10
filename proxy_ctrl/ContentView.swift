@@ -7,18 +7,103 @@
 
 import SwiftUI
 
-struct ContentView: View {
+// MARK: - Menu
+
+struct ProxyMenuView: View {
+    @EnvironmentObject var proxy: ProxyManager
+
     var body: some View {
-        VStack {
-            Image(systemName: "globe")
-                .imageScale(.large)
-                .foregroundStyle(.tint)
-            Text("Hello, world!")
+        Toggle("http", isOn: Binding(
+            get: { proxy.currentMode == .http },
+            set: { if $0 { proxy.applyHTTP() } }
+        ))
+        Toggle("socks", isOn: Binding(
+            get: { proxy.currentMode == .socks },
+            set: { if $0 { proxy.applySOCKS() } }
+        ))
+        Toggle("tun", isOn: .constant(false))
+            .disabled(true)
+        Toggle("direct", isOn: Binding(
+            get: { proxy.currentMode == .direct },
+            set: { if $0 { proxy.applyDirect() } }
+        ))
+
+        if let err = proxy.lastError {
+            Divider()
+            Text("⚠️ \(err)")
+                .foregroundColor(.red)
         }
-        .padding()
+
+        Divider()
+
+        Button("Settings…") {
+            // Open after the status menu dismisses to avoid bridge-cancel churn.
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) {
+                SettingsWindowController.shared.showSettings()
+            }
+        }
     }
 }
 
-#Preview {
-    ContentView()
+// MARK: - Settings
+
+struct SettingsView: View {
+    @AppStorage("networkService") private var networkService = "Wi-Fi"
+    @AppStorage("httpHost")       private var httpHost       = "192.168.2.223"
+    @AppStorage("httpPort")       private var httpPort       = "8899"
+    @AppStorage("httpsHost")      private var httpsHost      = "192.168.2.223"
+    @AppStorage("httpsPort")      private var httpsPort      = "8899"
+    @AppStorage("socksHost")      private var socksHost      = "192.168.2.201"
+    @AppStorage("socksPort")      private var socksPort      = "7788"
+
+    var body: some View {
+        Form {
+            Section("Network") {
+                LabeledContent("Service") {
+                    TextField("e.g. Wi-Fi", text: $networkService)
+                        .textFieldStyle(.roundedBorder)
+                        .frame(maxWidth: 200)
+                }
+            }
+            Section("HTTP Proxy") {
+                LabeledContent("Host") {
+                    TextField("host", text: $httpHost)
+                        .textFieldStyle(.roundedBorder)
+                        .frame(maxWidth: 200)
+                }
+                LabeledContent("Port") {
+                    TextField("port", text: $httpPort)
+                        .textFieldStyle(.roundedBorder)
+                        .frame(maxWidth: 80)
+                }
+            }
+            Section("HTTPS Proxy") {
+                LabeledContent("Host") {
+                    TextField("host", text: $httpsHost)
+                        .textFieldStyle(.roundedBorder)
+                        .frame(maxWidth: 200)
+                }
+                LabeledContent("Port") {
+                    TextField("port", text: $httpsPort)
+                        .textFieldStyle(.roundedBorder)
+                        .frame(maxWidth: 80)
+                }
+            }
+            Section("SOCKS5 Proxy") {
+                LabeledContent("Host") {
+                    TextField("host", text: $socksHost)
+                        .textFieldStyle(.roundedBorder)
+                        .frame(maxWidth: 200)
+                }
+                LabeledContent("Port") {
+                    TextField("port", text: $socksPort)
+                        .textFieldStyle(.roundedBorder)
+                        .frame(maxWidth: 80)
+                }
+            }
+        }
+        .formStyle(.grouped)
+        .frame(width: 400)
+        .padding(.vertical)
+    }
 }
