@@ -37,7 +37,8 @@ struct ProxyMenuView: View {
         Divider()
 
         Button("Settings…") {
-            // Open after the status menu dismisses to avoid bridge-cancel churn.
+            // Small delay lets the status menu finish dismissing before
+            // the panel appears, avoiding a visual overlap.
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) {
                 SettingsWindowController.shared.showSettings()
             }

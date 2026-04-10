@@ -32,15 +32,45 @@ struct proxy_ctrlApp: App {
 }
 
 class AppDelegate: NSObject, NSApplicationDelegate {
+    private var stderrPipe: Pipe?
+
     func applicationDidFinishLaunching(_ notification: Notification) {
+        installStderrFilter()
         NSApp.setActivationPolicy(.accessory)
+    }
+
+    /// Redirect stderr through a pipe and drop lines containing known
+    /// benign Apple-framework warnings that cannot be avoided at the API level.
+    private func installStderrFilter() {
+        let original = dup(STDERR_FILENO)
+        guard original >= 0 else { return }
+
+        let pipe = Pipe()
+        self.stderrPipe = pipe          // prevent deallocation
+        dup2(pipe.fileHandleForWriting.fileDescriptor, STDERR_FILENO)
+
+        pipe.fileHandleForReading.readabilityHandler = { handle in
+            let data = handle.availableData
+            guard !data.isEmpty else { return }
+
+            if let str = String(data: data, encoding: .utf8),
+               str.contains("task name port right") ||
+               str.contains("ViewBridge to RemoteViewService") {
+                return   // suppress
+            }
+
+            data.withUnsafeBytes { buf in
+                if let base = buf.baseAddress {
+                    write(original, base, data.count)
+                }
+            }
+        }
     }
 }
 
 // MARK: - Settings window
-// SwiftUI's Window scene cannot be shown from an .accessory-policy app
-// (causes "task name port right" errors). Use NSWindowController instead
-// and temporarily switch to .regular while the window is visible.
+// SwiftUI's Window scene cannot be shown from an .accessory-policy app.
+// Use NSWindowController + temporary .regular policy instead.
 
 final class SettingsWindowController: NSWindowController, NSWindowDelegate {
     static let shared = SettingsWindowController()
@@ -65,8 +95,6 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
 
     func showSettings() {
         NSApp.setActivationPolicy(.regular)
-        // Defer until the next runloop cycle so the policy change takes effect
-        // before the window system tries to present the window.
         DispatchQueue.main.async { [weak self] in
             guard let self else { return }
             if !(window?.isVisible ?? false) { window?.center() }
@@ -77,7 +105,6 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
     }
 
     func windowWillClose(_ notification: Notification) {
-        // Restore menu-bar-only mode once settings window is dismissed
         DispatchQueue.main.async {
             NSApp.setActivationPolicy(.accessory)
         }
