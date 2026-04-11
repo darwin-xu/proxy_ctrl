@@ -16,12 +16,13 @@ class ProxyManager: ObservableObject {
     @Published var currentMode: ProxyMode = .direct
     @Published var lastError: String? = nil
     @Published var tunLogLines: [String] = []
+    @Published var tunLogByteCount: Int = 0
 
     private var tunProcess: Process?
     private var tunOutputPipe: Pipe?
     private var tunErrorPipe: Pipe?
     private let tunLogQueue = DispatchQueue(label: "proxy_ctrl.tunLog")
-    private var pendingText = ""
+    private var pendingChunks: [String] = []
     private var incompleteLine = ""
     private var isFlushScheduled = false
 
@@ -179,11 +180,12 @@ class ProxyManager: ObservableObject {
     private func resetTunLog() {
         tunLogQueue.async { [weak self] in
             guard let self else { return }
-            self.pendingText = ""
+            self.pendingChunks = []
             self.incompleteLine = ""
             self.isFlushScheduled = false
             DispatchQueue.main.async { [weak self] in
                 self?.tunLogLines = []
+                self?.tunLogByteCount = 0
             }
         }
     }
@@ -191,11 +193,11 @@ class ProxyManager: ObservableObject {
     private func appendTunLog(_ text: String) {
         tunLogQueue.async { [weak self] in
             guard let self else { return }
-            self.pendingText += text
+            self.pendingChunks.append(text)
 
             guard !self.isFlushScheduled else { return }
             self.isFlushScheduled = true
-            self.tunLogQueue.asyncAfter(deadline: .now() + 0.3) { [weak self] in
+            self.tunLogQueue.asyncAfter(deadline: .now() + 0.5) { [weak self] in
                 guard let self else { return }
                 self.isFlushScheduled = false
                 self.flushPendingLog()
@@ -204,8 +206,9 @@ class ProxyManager: ObservableObject {
     }
 
     private func flushPendingLog() {
-        let text = incompleteLine + pendingText
-        pendingText = ""
+        let joined = pendingChunks.joined()
+        pendingChunks = []
+        let text = incompleteLine + joined
         incompleteLine = ""
         guard !text.isEmpty else { return }
 
@@ -216,8 +219,10 @@ class ProxyManager: ObservableObject {
         }
 
         guard !newLines.isEmpty else { return }
+        let addedBytes = newLines.reduce(0) { $0 + $1.utf8.count }
         DispatchQueue.main.async { [weak self] in
             self?.tunLogLines.append(contentsOf: newLines)
+            self?.tunLogByteCount += addedBytes
         }
     }
 

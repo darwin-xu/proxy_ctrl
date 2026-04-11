@@ -7,7 +7,6 @@
 
 import SwiftUI
 import UniformTypeIdentifiers
-import Combine
 
 // MARK: - Menu
 
@@ -54,7 +53,6 @@ struct ProxyMenuView: View {
 
 struct LogView: View {
     @EnvironmentObject var proxy: ProxyManager
-    @State private var memoryMB: Double = 0
 
     var body: some View {
         VStack(spacing: 0) {
@@ -66,14 +64,12 @@ struct LogView: View {
                 ScrollViewReader { reader in
                     ScrollView {
                         LazyVStack(alignment: .leading, spacing: 0) {
-                            ForEach(
-                                Array(proxy.tunLogLines.enumerated()), id: \.offset
-                            ) { _, line in
-                                Text(line)
+                            ForEach(0..<proxy.tunLogLines.count, id: \.self) { index in
+                                Text(proxy.tunLogLines[index])
                                     .font(.system(.caption, design: .monospaced))
-                                    .textSelection(.enabled)
                             }
                         }
+                        .textSelection(.enabled)
                         .frame(maxWidth: .infinity, alignment: .leading)
                         .padding()
                         Color.clear.frame(height: 0).id("bottom")
@@ -85,7 +81,7 @@ struct LogView: View {
             }
             Divider()
             HStack {
-                Text(String(format: "%.1f MB", memoryMB))
+                Text(String(format: "%.1f MB", Double(proxy.tunLogByteCount) / 1_048_576))
                     .font(.caption)
                     .foregroundColor(.secondary)
                     .padding(.leading)
@@ -106,15 +102,6 @@ struct LogView: View {
             }
         }
         .frame(width: 640, height: 420)
-        .onChange(of: proxy.tunLogLines.count) {
-            memoryMB = Self.logMemoryMB(proxy.tunLogLines)
-        }
-        .onAppear { memoryMB = Self.logMemoryMB(proxy.tunLogLines) }
-    }
-
-    static func logMemoryMB(_ lines: [String]) -> Double {
-        let bytes = lines.reduce(0) { $0 + $1.utf8.count }
-        return Double(bytes) / 1_048_576
     }
 }
 
