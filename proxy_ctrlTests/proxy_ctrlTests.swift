@@ -9,6 +9,24 @@ import Testing
 import Foundation
 @testable import proxy_ctrl
 
+private func makeProxyManagerForTesting(
+    networkService: String = "Test Network",
+    httpHost: String = "203.0.113.10",
+    httpPort: String = "18080",
+    socksHost: String = "203.0.113.20",
+    socksPort: String = "19090",
+    tunConfigPath: String? = ""
+) -> ProxyManager {
+    let manager = ProxyManager(forTesting: true)
+    manager.networkServiceOverride = networkService
+    manager.httpHostOverride = httpHost
+    manager.httpPortOverride = httpPort
+    manager.socksHostOverride = socksHost
+    manager.socksPortOverride = socksPort
+    manager.tunConfigPathOverride = tunConfigPath
+    return manager
+}
+
 // MARK: - ProxyMode
 
 struct ProxyModeTests {
@@ -259,31 +277,27 @@ struct LogPipelineTests {
 
 struct ApplyTunValidationTests {
     @Test func emptyConfigPathShowsError() {
-        let manager = ProxyManager(forTesting: true)
-        manager.tunConfigPathOverride = ""
+        let manager = makeProxyManagerForTesting(tunConfigPath: "")
         manager.applyTun()
         #expect(manager.lastError == "Please choose a sing-box config file in Settings.")
         #expect(manager.currentMode != .tun)
     }
 
     @Test func whitespaceOnlyConfigPathShowsError() {
-        let manager = ProxyManager(forTesting: true)
-        manager.tunConfigPathOverride = "   \t  "
+        let manager = makeProxyManagerForTesting(tunConfigPath: "   \t  ")
         manager.applyTun()
         #expect(manager.lastError == "Please choose a sing-box config file in Settings.")
     }
 
     @Test func missingConfigFileShowsError() {
-        let manager = ProxyManager(forTesting: true)
-        manager.tunConfigPathOverride = "/nonexistent/path/to/config.json"
+        let manager = makeProxyManagerForTesting(tunConfigPath: "/nonexistent/path/to/config.json")
         manager.applyTun()
         #expect(manager.lastError?.contains("sing-box config file not found") == true)
         #expect(manager.currentMode != .tun)
     }
 
     @Test func tildeExpandedInConfigPath() {
-        let manager = ProxyManager(forTesting: true)
-        manager.tunConfigPathOverride = "~/nonexistent_proxy_ctrl_test.json"
+        let manager = makeProxyManagerForTesting(tunConfigPath: "~/nonexistent_proxy_ctrl_test.json")
         manager.applyTun()
         let home = FileManager.default.homeDirectoryForCurrentUser.path
         if let err = manager.lastError, err.contains("config file not found") {
@@ -293,8 +307,7 @@ struct ApplyTunValidationTests {
     }
 
     @Test func applyTunDoesNotSetModeOnValidationFailure() {
-        let manager = ProxyManager(forTesting: true)
-        manager.tunConfigPathOverride = ""
+        let manager = makeProxyManagerForTesting(tunConfigPath: "")
         manager.currentMode = .direct
         manager.applyTun()
         #expect(manager.currentMode == .direct)
@@ -412,8 +425,7 @@ struct ApplyTunProcessTests {
         try "{}".write(to: tmp, atomically: true, encoding: .utf8)
         defer { try? FileManager.default.removeItem(at: tmp) }
 
-        let manager = ProxyManager(forTesting: true)
-        manager.tunConfigPathOverride = tmp.path
+        let manager = makeProxyManagerForTesting(tunConfigPath: tmp.path)
         manager.applyTun()
 
         // Either succeeds (sets tun mode) or fails (sets lastError)
@@ -458,7 +470,7 @@ struct ModeTransitionTests {
 
 struct ApplyHTTPTests {
     @Test func buildsCorrectCommands() {
-        let manager = ProxyManager(forTesting: true)
+        let manager = makeProxyManagerForTesting()
         var captured: [[String]] = []
         manager.runWithAuthHandler = { commands, completion in
             captured = commands
@@ -469,6 +481,9 @@ struct ApplyHTTPTests {
         // Check web proxy set
         #expect(captured[0].first == "-setwebproxy")
         #expect(captured[1].first == "-setsecurewebproxy")
+        #expect(captured[0].contains("Test Network"))
+        #expect(captured[0].contains("203.0.113.10"))
+        #expect(captured[0].contains("18080"))
         #expect(captured[2].first == "-setwebproxystate")
         #expect(captured[2].last == "on")
         #expect(captured[3].first == "-setsecurewebproxystate")
@@ -480,29 +495,28 @@ struct ApplyHTTPTests {
     }
 
     @Test func setsHTTPMode() {
-        let manager = ProxyManager(forTesting: true)
+        let manager = makeProxyManagerForTesting()
         manager.runWithAuthHandler = { _, completion in completion() }
         manager.applyHTTP()
         #expect(manager.currentMode == .http)
     }
 
-    @Test func usesDefaultHostPort() {
-        let manager = ProxyManager(forTesting: true)
+    @Test func usesOverrideHostPort() {
+        let manager = makeProxyManagerForTesting()
         var captured: [[String]] = []
         manager.runWithAuthHandler = { commands, completion in
             captured = commands
             completion()
         }
         manager.applyHTTP()
-        // Default httpHost is "192.168.2.223", httpPort is "8899"
-        #expect(captured[0].contains("192.168.2.223"))
-        #expect(captured[0].contains("8899"))
+        #expect(captured[0].contains("203.0.113.10"))
+        #expect(captured[0].contains("18080"))
     }
 }
 
 struct ApplySOCKSTests {
     @Test func buildsCorrectCommands() {
-        let manager = ProxyManager(forTesting: true)
+        let manager = makeProxyManagerForTesting()
         var captured: [[String]] = []
         manager.runWithAuthHandler = { commands, completion in
             captured = commands
@@ -512,6 +526,9 @@ struct ApplySOCKSTests {
         #expect(captured.count == 6)
         // Socks proxy set
         #expect(captured[0].first == "-setsocksfirewallproxy")
+        #expect(captured[0].contains("Test Network"))
+        #expect(captured[0].contains("203.0.113.20"))
+        #expect(captured[0].contains("19090"))
         #expect(captured[1].first == "-setsocksfirewallproxystate")
         #expect(captured[1].last == "on")
         // Web proxy turned off
@@ -524,29 +541,28 @@ struct ApplySOCKSTests {
     }
 
     @Test func setsSOCKSMode() {
-        let manager = ProxyManager(forTesting: true)
+        let manager = makeProxyManagerForTesting()
         manager.runWithAuthHandler = { _, completion in completion() }
         manager.applySOCKS()
         #expect(manager.currentMode == .socks)
     }
 
-    @Test func usesDefaultHostPort() {
-        let manager = ProxyManager(forTesting: true)
+    @Test func usesOverrideHostPort() {
+        let manager = makeProxyManagerForTesting()
         var captured: [[String]] = []
         manager.runWithAuthHandler = { commands, completion in
             captured = commands
             completion()
         }
         manager.applySOCKS()
-        // Default socksHost is "192.168.2.201", socksPort is "7788"
-        #expect(captured[0].contains("192.168.2.201"))
-        #expect(captured[0].contains("7788"))
+        #expect(captured[0].contains("203.0.113.20"))
+        #expect(captured[0].contains("19090"))
     }
 }
 
 struct ApplyDirectTests {
     @Test func buildsCorrectCommands() {
-        let manager = ProxyManager(forTesting: true)
+        let manager = makeProxyManagerForTesting()
         var captured: [[String]] = []
         manager.runWithAuthHandler = { commands, completion in
             captured = commands
@@ -556,6 +572,7 @@ struct ApplyDirectTests {
         #expect(captured.count == 6)
         // All proxies disabled
         #expect(captured[0].first == "-setwebproxy")
+        #expect(captured[0].contains("Test Network"))
         #expect(captured[1].first == "-setsecurewebproxy")
         #expect(captured[2].first == "-setsocksfirewallproxy")
         #expect(captured[3].first == "-setwebproxystate")
@@ -567,21 +584,18 @@ struct ApplyDirectTests {
     }
 
     @Test func setsDirectMode() {
-        let manager = ProxyManager(forTesting: true)
+        let manager = makeProxyManagerForTesting()
         manager.runWithAuthHandler = { _, completion in completion() }
         manager.applyDirect()
         #expect(manager.currentMode == .direct)
     }
 }
 
-// MARK: - tunConfigPath nil-coalescing fallback
+// MARK: - tunConfigPath override
 
 struct TunConfigPathTests {
-    @Test func nilOverrideFallsToUserDefaults() {
-        let manager = ProxyManager(forTesting: true)
-        // tunConfigPathOverride is nil by default
-        // UserDefaults may or may not have "tunConfigPath"
-        // Either way, applyTun should hit the empty config path validation
+    @Test func emptyOverrideShowsValidationError() {
+        let manager = makeProxyManagerForTesting(tunConfigPath: "")
         manager.applyTun()
         #expect(manager.lastError == "Please choose a sing-box config file in Settings.")
     }
@@ -591,7 +605,7 @@ struct TunConfigPathTests {
 
 struct StopTunViaApplyTests {
     @Test func applyHTTPStopsPreviousTun() {
-        let manager = ProxyManager(forTesting: true)
+        let manager = makeProxyManagerForTesting()
         manager.currentMode = .tun
         manager.runWithAuthHandler = { _, completion in completion() }
         manager.applyHTTP()
@@ -599,7 +613,7 @@ struct StopTunViaApplyTests {
     }
 
     @Test func applySOCKSStopsPreviousTun() {
-        let manager = ProxyManager(forTesting: true)
+        let manager = makeProxyManagerForTesting()
         manager.currentMode = .tun
         manager.runWithAuthHandler = { _, completion in completion() }
         manager.applySOCKS()
@@ -607,7 +621,7 @@ struct StopTunViaApplyTests {
     }
 
     @Test func applyDirectStopsPreviousTun() {
-        let manager = ProxyManager(forTesting: true)
+        let manager = makeProxyManagerForTesting()
         manager.currentMode = .tun
         manager.runWithAuthHandler = { _, completion in completion() }
         manager.applyDirect()

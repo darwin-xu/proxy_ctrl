@@ -18,7 +18,12 @@ class ProxyManager: ObservableObject {
     @Published var tunLogLines: [String] = []
     @Published var tunLogByteCount: Int = 0
 
-    /// Override for testing; when non-nil, used instead of UserDefaults.
+    /// Overrides for testing; when non-nil, used instead of UserDefaults.
+    var networkServiceOverride: String?
+    var httpHostOverride: String?
+    var httpPortOverride: String?
+    var socksHostOverride: String?
+    var socksPortOverride: String?
     var tunConfigPathOverride: String?
 
     /// Hook for testing; when non-nil, called instead of spawning real processes.
@@ -47,19 +52,19 @@ class ProxyManager: ObservableObject {
     }
 
     private var networkService: String {
-        UserDefaults.standard.string(forKey: "networkService") ?? "Wi-Fi"
+        networkServiceOverride ?? (UserDefaults.standard.string(forKey: "networkService") ?? "Wi-Fi")
     }
     private var httpHost: String {
-        UserDefaults.standard.string(forKey: "httpHost") ?? "192.168.2.223"
+        httpHostOverride ?? (UserDefaults.standard.string(forKey: "httpHost") ?? "192.168.2.223")
     }
     private var httpPort: String {
-        UserDefaults.standard.string(forKey: "httpPort") ?? "8899"
+        httpPortOverride ?? (UserDefaults.standard.string(forKey: "httpPort") ?? "8899")
     }
     private var socksHost: String {
-        UserDefaults.standard.string(forKey: "socksHost") ?? "192.168.2.201"
+        socksHostOverride ?? (UserDefaults.standard.string(forKey: "socksHost") ?? "192.168.2.201")
     }
     private var socksPort: String {
-        UserDefaults.standard.string(forKey: "socksPort") ?? "7788"
+        socksPortOverride ?? (UserDefaults.standard.string(forKey: "socksPort") ?? "7788")
     }
     private var tunConfigPath: String {
         tunConfigPathOverride ?? (UserDefaults.standard.string(forKey: "tunConfigPath") ?? "")
