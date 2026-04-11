@@ -138,7 +138,12 @@ class ProxyManager: ObservableObject {
                 return
             }
             guard let str = String(data: data, encoding: .utf8) else { return }
-            self?.appendTunLog(str)
+            let clean = str.replacingOccurrences(
+                of: "\\e\\[[0-9;]*m",
+                with: "",
+                options: .regularExpression
+            )
+            self?.appendTunLog(clean)
         }
         outPipe.fileHandleForReading.readabilityHandler = { append($0) }
         errPipe.fileHandleForReading.readabilityHandler = { append($0) }
