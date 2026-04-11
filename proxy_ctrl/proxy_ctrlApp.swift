@@ -87,6 +87,7 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
         win.contentViewController = hosting
         win.setContentSize(NSSize(width: 420, height: 480))
         win.center()
+        win.hidesOnDeactivate = false
         super.init(window: win)
         win.delegate = self
     }
