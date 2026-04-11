@@ -52,8 +52,6 @@ struct SettingsView: View {
     @AppStorage("networkService") private var networkService = "Wi-Fi"
     @AppStorage("httpHost")       private var httpHost       = "192.168.2.223"
     @AppStorage("httpPort")       private var httpPort       = "8899"
-    @AppStorage("httpsHost")      private var httpsHost      = "192.168.2.223"
-    @AppStorage("httpsPort")      private var httpsPort      = "8899"
     @AppStorage("socksHost")      private var socksHost      = "192.168.2.201"
     @AppStorage("socksPort")      private var socksPort      = "7788"
 
@@ -66,7 +64,7 @@ struct SettingsView: View {
                         .frame(maxWidth: 200)
                 }
             }
-            Section("HTTP Proxy") {
+            Section("HTTP/HTTPS Proxy") {
                 LabeledContent("Host") {
                     TextField("host", text: $httpHost)
                         .textFieldStyle(.roundedBorder)
@@ -78,19 +76,7 @@ struct SettingsView: View {
                         .frame(maxWidth: 80)
                 }
             }
-            Section("HTTPS Proxy") {
-                LabeledContent("Host") {
-                    TextField("host", text: $httpsHost)
-                        .textFieldStyle(.roundedBorder)
-                        .frame(maxWidth: 200)
-                }
-                LabeledContent("Port") {
-                    TextField("port", text: $httpsPort)
-                        .textFieldStyle(.roundedBorder)
-                        .frame(maxWidth: 80)
-                }
-            }
-            Section("SOCKS5 Proxy") {
+            Section("SOCKS Proxy") {
                 LabeledContent("Host") {
                     TextField("host", text: $socksHost)
                         .textFieldStyle(.roundedBorder)

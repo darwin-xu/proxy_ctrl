@@ -25,12 +25,6 @@ class ProxyManager: ObservableObject {
     private var httpPort: String {
         UserDefaults.standard.string(forKey: "httpPort") ?? "8899"
     }
-    private var httpsHost: String {
-        UserDefaults.standard.string(forKey: "httpsHost") ?? "192.168.2.223"
-    }
-    private var httpsPort: String {
-        UserDefaults.standard.string(forKey: "httpsPort") ?? "8899"
-    }
     private var socksHost: String {
         UserDefaults.standard.string(forKey: "socksHost") ?? "192.168.2.201"
     }
@@ -43,8 +37,6 @@ class ProxyManager: ObservableObject {
             "networkService": "Wi-Fi",
             "httpHost": "192.168.2.223",
             "httpPort": "8899",
-            "httpsHost": "192.168.2.223",
-            "httpsPort": "8899",
             "socksHost": "192.168.2.201",
             "socksPort": "7788",
         ])
@@ -57,11 +49,9 @@ class ProxyManager: ObservableObject {
         let svc = networkService
         let webHost = httpHost
         let webPort = httpPort
-        let secureHost = httpsHost
-        let securePort = httpsPort
         let cmds: [[String]] = [
             ["-setwebproxy",                svc, webHost, webPort],
-            ["-setsecurewebproxy",          svc, secureHost, securePort],
+            ["-setsecurewebproxy",          svc, webHost, webPort],
             ["-setwebproxystate",         svc, "on"],
             ["-setsecurewebproxystate",   svc, "on"],
             ["-setsocksfirewallproxy",      svc, "", "0"],
