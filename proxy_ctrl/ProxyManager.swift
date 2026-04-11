@@ -15,6 +15,9 @@ class ProxyManager: ObservableObject {
 
     @Published var currentMode: ProxyMode = .direct
     @Published var lastError: String? = nil
+    @Published var tunLog: String = ""
+
+    private var tunProcess: Process?
 
     private var networkService: String {
         UserDefaults.standard.string(forKey: "networkService") ?? "Wi-Fi"
@@ -31,6 +34,9 @@ class ProxyManager: ObservableObject {
     private var socksPort: String {
         UserDefaults.standard.string(forKey: "socksPort") ?? "7788"
     }
+    private var tunConfigPath: String {
+        UserDefaults.standard.string(forKey: "tunConfigPath") ?? ""
+    }
 
     private init() {
         UserDefaults.standard.register(defaults: [
@@ -39,6 +45,7 @@ class ProxyManager: ObservableObject {
             "httpPort": "8899",
             "socksHost": "192.168.2.201",
             "socksPort": "7788",
+            "tunConfigPath": "",
         ])
         refreshCurrentMode()
     }
@@ -46,6 +53,7 @@ class ProxyManager: ObservableObject {
     // MARK: - Proxy actions (each batches into a single auth prompt)
 
     func applyHTTP() {
+        stopTun()
         let svc = networkService
         let webHost = httpHost
         let webPort = httpPort
@@ -61,6 +69,7 @@ class ProxyManager: ObservableObject {
     }
 
     func applySOCKS() {
+        stopTun()
         let svc = networkService
         let host = socksHost
         let port = socksPort
@@ -76,6 +85,7 @@ class ProxyManager: ObservableObject {
     }
 
     func applyDirect() {
+        stopTun()
         let svc = networkService
         let cmds: [[String]] = [
             ["-setwebproxy",                svc, "", "0"],
@@ -86,6 +96,59 @@ class ProxyManager: ObservableObject {
             ["-setsocksfirewallproxystate", svc, "off"],
         ]
         runWithAuth(cmds) { self.currentMode = .direct }
+    }
+
+    func applyTun() {
+        stopTun()
+        tunLog = ""
+        guard let singBoxPath = resolveSingBoxPath() else {
+            lastError = "sing-box not found. Checked common install paths and /usr/bin/which."
+            return
+        }
+        let configPath = NSString(string: tunConfigPath).expandingTildeInPath
+        guard !configPath.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            lastError = "Please choose a sing-box config file in Settings."
+            return
+        }
+        guard FileManager.default.fileExists(atPath: configPath) else {
+            lastError = "sing-box config file not found: \(configPath)"
+            return
+        }
+        let proc = Process()
+        proc.executableURL = URL(fileURLWithPath: "/usr/bin/sudo")
+        proc.arguments = ["-n", singBoxPath, "run", "-c", configPath]
+        let outPipe = Pipe()
+        let errPipe = Pipe()
+        proc.standardOutput = outPipe
+        proc.standardError  = errPipe
+
+        let append: (FileHandle) -> Void = { [weak self] handle in
+            let data = handle.availableData
+            guard !data.isEmpty, let str = String(data: data, encoding: .utf8) else { return }
+            DispatchQueue.main.async { self?.tunLog += str }
+        }
+        outPipe.fileHandleForReading.readabilityHandler = { append($0) }
+        errPipe.fileHandleForReading.readabilityHandler = { append($0) }
+
+        proc.terminationHandler = { [weak self] _ in
+            DispatchQueue.main.async {
+                guard let self else { return }
+                if self.currentMode == .tun { self.currentMode = .direct }
+            }
+        }
+
+        do {
+            try proc.run()
+            tunProcess = proc
+            currentMode = .tun
+        } catch {
+            lastError = "Failed to start tun: \(error.localizedDescription)"
+        }
+    }
+
+    private func stopTun() {
+        tunProcess?.terminate()
+        tunProcess = nil
     }
 
     // MARK: - State detection
@@ -109,6 +172,25 @@ class ProxyManager: ObservableObject {
     }
 
     // MARK: - Execution helpers
+
+    /// Resolve sing-box by absolute path so sudo does not depend on PATH.
+    private func resolveSingBoxPath() -> String? {
+        let candidates = [
+            "/opt/homebrew/bin/sing-box",
+            "/usr/local/bin/sing-box",
+            "/usr/bin/sing-box",
+        ]
+        for path in candidates where FileManager.default.isExecutableFile(atPath: path) {
+            return path
+        }
+
+        let found = readCommand(at: "/usr/bin/which", args: ["sing-box"])
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        if !found.isEmpty, FileManager.default.isExecutableFile(atPath: found) {
+            return found
+        }
+        return nil
+    }
 
     /// Run multiple networksetup commands directly.
     private func runWithAuth(_ commands: [[String]], completion: @escaping () -> Void) {
@@ -142,8 +224,12 @@ class ProxyManager: ObservableObject {
 
     /// Read networksetup output (no auth needed for reads).
     private func readCommand(_ args: [String]) -> String {
+        readCommand(at: "/usr/sbin/networksetup", args: args)
+    }
+
+    private func readCommand(at executablePath: String, args: [String]) -> String {
         let proc = Process()
-        proc.executableURL = URL(fileURLWithPath: "/usr/sbin/networksetup")
+        proc.executableURL = URL(fileURLWithPath: executablePath)
         proc.arguments = args
         let pipe = Pipe()
         proc.standardOutput = pipe

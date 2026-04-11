@@ -85,7 +85,7 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
         )
         win.title = "Settings"
         win.contentViewController = hosting
-        win.setContentSize(NSSize(width: 420, height: 480))
+        win.setContentSize(NSSize(width: 560, height: 620))
         win.center()
         win.hidesOnDeactivate = false
         super.init(window: win)
@@ -95,6 +95,50 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
     required init?(coder: NSCoder) { fatalError() }
 
     func showSettings() {
+        NSApp.setActivationPolicy(.regular)
+        DispatchQueue.main.async { [weak self] in
+            guard let self else { return }
+            if !(window?.isVisible ?? false) { window?.center() }
+            showWindow(nil)
+            window?.makeKeyAndOrderFront(nil)
+            NSApp.activate(ignoringOtherApps: true)
+        }
+    }
+
+    func windowWillClose(_ notification: Notification) {
+        DispatchQueue.main.async {
+            NSApp.setActivationPolicy(.accessory)
+        }
+    }
+}
+
+// MARK: - Log window
+
+final class LogWindowController: NSWindowController, NSWindowDelegate {
+    static let shared = LogWindowController()
+
+    private init() {
+        let hosting = NSHostingController(
+            rootView: LogView().environmentObject(ProxyManager.shared)
+        )
+        let win = NSPanel(
+            contentRect: .zero,
+            styleMask: [.titled, .closable, .resizable],
+            backing: .buffered,
+            defer: false
+        )
+        win.title = "Tun Log"
+        win.contentViewController = hosting
+        win.setContentSize(NSSize(width: 640, height: 420))
+        win.center()
+        win.hidesOnDeactivate = false
+        super.init(window: win)
+        win.delegate = self
+    }
+
+    required init?(coder: NSCoder) { fatalError() }
+
+    func showLog() {
         NSApp.setActivationPolicy(.regular)
         DispatchQueue.main.async { [weak self] in
             guard let self else { return }

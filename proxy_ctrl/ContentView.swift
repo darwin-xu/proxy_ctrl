@@ -6,6 +6,7 @@
 //
 
 import SwiftUI
+import UniformTypeIdentifiers
 
 // MARK: - Menu
 
@@ -21,8 +22,10 @@ struct ProxyMenuView: View {
             get: { proxy.currentMode == .socks },
             set: { if $0 { proxy.applySOCKS() } }
         ))
-        Toggle("tun", isOn: .constant(false))
-            .disabled(true)
+        Toggle("tun", isOn: Binding(
+            get: { proxy.currentMode == .tun },
+            set: { on in if on { proxy.applyTun() } else { proxy.applyDirect() } }
+        ))
         Toggle("direct", isOn: Binding(
             get: { proxy.currentMode == .direct },
             set: { if $0 { proxy.applyDirect() } }
@@ -46,6 +49,37 @@ struct ProxyMenuView: View {
     }
 }
 
+// MARK: - Log
+
+struct LogView: View {
+    @EnvironmentObject var proxy: ProxyManager
+
+    var body: some View {
+        VStack(spacing: 0) {
+            ScrollViewReader { reader in
+                ScrollView {
+                    Text(proxy.tunLog.isEmpty ? "(no log yet)" : proxy.tunLog)
+                        .font(.system(.caption, design: .monospaced))
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .textSelection(.enabled)
+                        .padding()
+                    Color.clear.frame(height: 1).id("bottom")
+                }
+                .onChange(of: proxy.tunLog) { _ in
+                    reader.scrollTo("bottom")
+                }
+            }
+            Divider()
+            HStack {
+                Spacer()
+                Button("Clear") { proxy.tunLog = "" }
+                    .padding()
+            }
+        }
+        .frame(width: 640, height: 420)
+    }
+}
+
 // MARK: - Settings
 
 struct SettingsView: View {
@@ -54,43 +88,75 @@ struct SettingsView: View {
     @AppStorage("httpPort")       private var httpPort       = "8899"
     @AppStorage("socksHost")      private var socksHost      = "192.168.2.201"
     @AppStorage("socksPort")      private var socksPort      = "7788"
+    @AppStorage("tunConfigPath")  private var tunConfigPath  = ""
+    @State private var showingConfigPicker = false
 
     var body: some View {
-        Form {
-            Section("Network") {
-                LabeledContent("Service") {
-                    TextField("e.g. Wi-Fi", text: $networkService)
-                        .textFieldStyle(.roundedBorder)
-                        .frame(maxWidth: 200)
+        VStack(spacing: 0) {
+            Form {
+                Section("Network") {
+                    LabeledContent("Service") {
+                        TextField("e.g. Wi-Fi", text: $networkService)
+                            .textFieldStyle(.roundedBorder)
+                            .frame(maxWidth: 200)
+                    }
+                }
+                Section("HTTP/HTTPS Proxy") {
+                    LabeledContent("Host") {
+                        TextField("host", text: $httpHost)
+                            .textFieldStyle(.roundedBorder)
+                            .frame(maxWidth: 200)
+                    }
+                    LabeledContent("Port") {
+                        TextField("port", text: $httpPort)
+                            .textFieldStyle(.roundedBorder)
+                            .frame(maxWidth: 80)
+                    }
+                }
+                Section("SOCKS Proxy") {
+                    LabeledContent("Host") {
+                        TextField("host", text: $socksHost)
+                            .textFieldStyle(.roundedBorder)
+                            .frame(maxWidth: 200)
+                    }
+                    LabeledContent("Port") {
+                        TextField("port", text: $socksPort)
+                            .textFieldStyle(.roundedBorder)
+                            .frame(maxWidth: 80)
+                    }
+                }
+                Section("sing-box") {
+                    HStack(spacing: 8) {
+                        TextField("", text: $tunConfigPath)
+                            .textFieldStyle(.roundedBorder)
+                        Button("Browse…") {
+                            showingConfigPicker = true
+                        }
+                    }
                 }
             }
-            Section("HTTP/HTTPS Proxy") {
-                LabeledContent("Host") {
-                    TextField("host", text: $httpHost)
-                        .textFieldStyle(.roundedBorder)
-                        .frame(maxWidth: 200)
-                }
-                LabeledContent("Port") {
-                    TextField("port", text: $httpPort)
-                        .textFieldStyle(.roundedBorder)
-                        .frame(maxWidth: 80)
+            .formStyle(.grouped)
+            .padding(.vertical)
+            .fileImporter(
+                isPresented: $showingConfigPicker,
+                allowedContentTypes: [.json],
+                allowsMultipleSelection: false
+            ) { result in
+                if case let .success(urls) = result, let url = urls.first {
+                    tunConfigPath = url.path
                 }
             }
-            Section("SOCKS Proxy") {
-                LabeledContent("Host") {
-                    TextField("host", text: $socksHost)
-                        .textFieldStyle(.roundedBorder)
-                        .frame(maxWidth: 200)
+
+            Divider()
+
+            HStack {
+                Spacer()
+                Button("View Log…") {
+                    LogWindowController.shared.showLog()
                 }
-                LabeledContent("Port") {
-                    TextField("port", text: $socksPort)
-                        .textFieldStyle(.roundedBorder)
-                        .frame(maxWidth: 80)
-                }
+                .padding()
             }
         }
-        .formStyle(.grouped)
-        .frame(width: 400)
-        .padding(.vertical)
+        .frame(width: 540)
     }
 }
