@@ -24,6 +24,7 @@
 /* End PBXContainerItemProxy section */
 
 /* Begin PBXFileReference section */
+		D681993C2F8A8361009BF109 /* proxy_ctrl.xctestplan */ = {isa = PBXFileReference; lastKnownFileType = text; path = proxy_ctrl.xctestplan; sourceTree = "<group>"; };
 		D6CCD4F82F88A4C300BE3A14 /* proxy_ctrl.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = proxy_ctrl.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		D6CCD5052F88A4C500BE3A14 /* proxy_ctrlTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = proxy_ctrlTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 		D6CCD50F2F88A4C500BE3A14 /* proxy_ctrlUITests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = proxy_ctrlUITests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
@@ -75,6 +76,7 @@
 		D6CCD4EF2F88A4C300BE3A14 = {
 			isa = PBXGroup;
 			children = (
+				D681993C2F8A8361009BF109 /* proxy_ctrl.xctestplan */,
 				D6CCD4FA2F88A4C300BE3A14 /* proxy_ctrl */,
 				D6CCD5082F88A4C500BE3A14 /* proxy_ctrlTests */,
 				D6CCD5122F88A4C500BE3A14 /* proxy_ctrlUITests */,

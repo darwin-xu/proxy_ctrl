@@ -18,6 +18,12 @@ class ProxyManager: ObservableObject {
     @Published var tunLogLines: [String] = []
     @Published var tunLogByteCount: Int = 0
 
+    /// Override for testing; when non-nil, used instead of UserDefaults.
+    var tunConfigPathOverride: String?
+
+    /// Hook for testing; when non-nil, called instead of spawning real processes.
+    var runWithAuthHandler: ((_ commands: [[String]], _ completion: @escaping () -> Void) -> Void)?
+
     private var tunProcess: Process?
     private var tunOutputPipe: Pipe?
     private var tunErrorPipe: Pipe?
@@ -25,6 +31,20 @@ class ProxyManager: ObservableObject {
     private var pendingChunks: [String] = []
     private var incompleteLine = ""
     private var isFlushScheduled = false
+
+    // MARK: - Pure helpers (testable)
+
+    static func stripANSI(_ str: String) -> String {
+        str.replacingOccurrences(of: "\\e\\[[0-9;]*m", with: "", options: .regularExpression)
+    }
+
+    static func splitLines(_ text: String) -> (lines: [String], remainder: String) {
+        guard !text.isEmpty else { return ([], "") }
+        let segments = text.components(separatedBy: "\n")
+        let lines = Array(segments.dropLast())
+        let remainder = text.hasSuffix("\n") ? "" : (segments.last ?? "")
+        return (lines, remainder)
+    }
 
     private var networkService: String {
         UserDefaults.standard.string(forKey: "networkService") ?? "Wi-Fi"
@@ -42,7 +62,7 @@ class ProxyManager: ObservableObject {
         UserDefaults.standard.string(forKey: "socksPort") ?? "7788"
     }
     private var tunConfigPath: String {
-        UserDefaults.standard.string(forKey: "tunConfigPath") ?? ""
+        tunConfigPathOverride ?? (UserDefaults.standard.string(forKey: "tunConfigPath") ?? "")
     }
 
     private init() {
@@ -55,6 +75,11 @@ class ProxyManager: ObservableObject {
             "tunConfigPath": "",
         ])
         refreshCurrentMode()
+    }
+
+    /// Testing-only initializer that skips side effects.
+    init(forTesting: Bool) {
+        _ = forTesting
     }
 
     // MARK: - Proxy actions (each batches into a single auth prompt)
@@ -108,10 +133,6 @@ class ProxyManager: ObservableObject {
     func applyTun() {
         stopTun()
         resetTunLog()
-        guard let singBoxPath = resolveSingBoxPath() else {
-            lastError = "sing-box not found. Checked common install paths and /usr/bin/which."
-            return
-        }
         let configPath = NSString(string: tunConfigPath).expandingTildeInPath
         guard !configPath.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
             lastError = "Please choose a sing-box config file in Settings."
@@ -119,6 +140,10 @@ class ProxyManager: ObservableObject {
         }
         guard FileManager.default.fileExists(atPath: configPath) else {
             lastError = "sing-box config file not found: \(configPath)"
+            return
+        }
+        guard let singBoxPath = resolveSingBoxPath() else {
+            lastError = "sing-box not found. Checked common install paths and /usr/bin/which."
             return
         }
         let proc = Process()
@@ -138,11 +163,7 @@ class ProxyManager: ObservableObject {
                 return
             }
             guard let str = String(data: data, encoding: .utf8) else { return }
-            let clean = str.replacingOccurrences(
-                of: "\\e\\[[0-9;]*m",
-                with: "",
-                options: .regularExpression
-            )
+            let clean = ProxyManager.stripANSI(str)
             self?.appendTunLog(clean)
         }
         outPipe.fileHandleForReading.readabilityHandler = { append($0) }
@@ -195,7 +216,7 @@ class ProxyManager: ObservableObject {
         }
     }
 
-    private func appendTunLog(_ text: String) {
+    func appendTunLog(_ text: String) {
         tunLogQueue.async { [weak self] in
             guard let self else { return }
             self.pendingChunks.append(text)
@@ -217,11 +238,8 @@ class ProxyManager: ObservableObject {
         incompleteLine = ""
         guard !text.isEmpty else { return }
 
-        let segments = text.components(separatedBy: "\n")
-        let newLines = Array(segments.dropLast())
-        if !text.hasSuffix("\n") {
-            incompleteLine = segments.last ?? ""
-        }
+        let (newLines, remainder) = Self.splitLines(text)
+        incompleteLine = remainder
 
         guard !newLines.isEmpty else { return }
         let addedBytes = newLines.reduce(0) { $0 + $1.utf8.count }
@@ -254,7 +272,7 @@ class ProxyManager: ObservableObject {
     // MARK: - Execution helpers
 
     /// Resolve sing-box by absolute path so sudo does not depend on PATH.
-    private func resolveSingBoxPath() -> String? {
+    func resolveSingBoxPath() -> String? {
         let candidates = [
             "/opt/homebrew/bin/sing-box",
             "/usr/local/bin/sing-box",
@@ -274,6 +292,10 @@ class ProxyManager: ObservableObject {
 
     /// Run multiple networksetup commands directly.
     private func runWithAuth(_ commands: [[String]], completion: @escaping () -> Void) {
+        if let handler = runWithAuthHandler {
+            handler(commands, completion)
+            return
+        }
         DispatchQueue.global(qos: .userInitiated).async {
             var errors: [String] = []
             for args in commands {
@@ -307,7 +329,7 @@ class ProxyManager: ObservableObject {
         readCommand(at: "/usr/sbin/networksetup", args: args)
     }
 
-    private func readCommand(at executablePath: String, args: [String]) -> String {
+    func readCommand(at executablePath: String, args: [String]) -> String {
         let proc = Process()
         proc.executableURL = URL(fileURLWithPath: executablePath)
         proc.arguments = args
