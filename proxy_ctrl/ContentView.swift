@@ -94,29 +94,27 @@ struct LogView: View {
                     .font(.caption)
                     .foregroundColor(.secondary)
                 Spacer()
+                Button("Copy All") {
+                    NSPasteboard.general.clearContents()
+                    NSPasteboard.general.setString(
+                        proxy.tunLogLines.joined(separator: "\n"),
+                        forType: .string
+                    )
+                }
                 Button("Clear") { proxy.clearTunLog() }
                     .padding()
             }
         }
         .frame(width: 640, height: 420)
-        .onReceive(Timer.publish(every: 2, on: .main, in: .common).autoconnect()) { _ in
-            memoryMB = Self.currentMemoryMB()
+        .onChange(of: proxy.tunLogLines.count) {
+            memoryMB = Self.logMemoryMB(proxy.tunLogLines)
         }
-        .onAppear { memoryMB = Self.currentMemoryMB() }
+        .onAppear { memoryMB = Self.logMemoryMB(proxy.tunLogLines) }
     }
 
-    static func currentMemoryMB() -> Double {
-        var info = mach_task_basic_info()
-        var count = mach_msg_type_number_t(
-            MemoryLayout<mach_task_basic_info>.size / MemoryLayout<integer_t>.size
-        )
-        let result = withUnsafeMutablePointer(to: &info) {
-            $0.withMemoryRebound(to: integer_t.self, capacity: Int(count)) {
-                task_info(mach_task_self_, task_flavor_t(MACH_TASK_BASIC_INFO), $0, &count)
-            }
-        }
-        guard result == KERN_SUCCESS else { return 0 }
-        return Double(info.resident_size) / 1_048_576
+    static func logMemoryMB(_ lines: [String]) -> Double {
+        let bytes = lines.reduce(0) { $0 + $1.utf8.count }
+        return Double(bytes) / 1_048_576
     }
 }
 

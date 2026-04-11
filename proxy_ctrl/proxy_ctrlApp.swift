@@ -88,6 +88,7 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
         win.setContentSize(NSSize(width: 560, height: 620))
         win.center()
         win.hidesOnDeactivate = false
+        win.collectionBehavior = [.moveToActiveSpace]
         super.init(window: win)
         win.delegate = self
     }
@@ -98,7 +99,7 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
         NSApp.setActivationPolicy(.regular)
         DispatchQueue.main.async { [weak self] in
             guard let self else { return }
-            if !(window?.isVisible ?? false) { window?.center() }
+            window?.center()
             showWindow(nil)
             window?.makeKeyAndOrderFront(nil)
             NSApp.activate(ignoringOtherApps: true)
@@ -132,6 +133,7 @@ final class LogWindowController: NSWindowController, NSWindowDelegate {
         win.setContentSize(NSSize(width: 640, height: 420))
         win.center()
         win.hidesOnDeactivate = false
+        win.collectionBehavior = [.moveToActiveSpace]
         super.init(window: win)
         win.delegate = self
     }
@@ -142,7 +144,7 @@ final class LogWindowController: NSWindowController, NSWindowDelegate {
         NSApp.setActivationPolicy(.regular)
         DispatchQueue.main.async { [weak self] in
             guard let self else { return }
-            if !(window?.isVisible ?? false) { window?.center() }
+            window?.center()
             showWindow(nil)
             window?.makeKeyAndOrderFront(nil)
             NSApp.activate(ignoringOtherApps: true)
