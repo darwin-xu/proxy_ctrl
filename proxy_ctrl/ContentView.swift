@@ -7,6 +7,7 @@
 
 import SwiftUI
 import UniformTypeIdentifiers
+import Combine
 
 // MARK: - Menu
 
@@ -53,30 +54,69 @@ struct ProxyMenuView: View {
 
 struct LogView: View {
     @EnvironmentObject var proxy: ProxyManager
+    @State private var memoryMB: Double = 0
 
     var body: some View {
         VStack(spacing: 0) {
-            ScrollViewReader { reader in
-                ScrollView {
-                    Text(proxy.tunLog.isEmpty ? "(no log yet)" : proxy.tunLog)
-                        .font(.system(.caption, design: .monospaced))
+            if proxy.tunLogLines.isEmpty {
+                Text("(no log yet)")
+                    .foregroundColor(.secondary)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+            } else {
+                ScrollViewReader { reader in
+                    ScrollView {
+                        LazyVStack(alignment: .leading, spacing: 0) {
+                            ForEach(
+                                Array(proxy.tunLogLines.enumerated()), id: \.offset
+                            ) { _, line in
+                                Text(line)
+                                    .font(.system(.caption, design: .monospaced))
+                                    .textSelection(.enabled)
+                            }
+                        }
                         .frame(maxWidth: .infinity, alignment: .leading)
-                        .textSelection(.enabled)
                         .padding()
-                    Color.clear.frame(height: 1).id("bottom")
-                }
-                .onChange(of: proxy.tunLog) { _ in
-                    reader.scrollTo("bottom")
+                        Color.clear.frame(height: 0).id("bottom")
+                    }
+                    .onChange(of: proxy.tunLogLines.count) {
+                        reader.scrollTo("bottom", anchor: .bottom)
+                    }
                 }
             }
             Divider()
             HStack {
+                Text(String(format: "%.1f MB", memoryMB))
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+                    .padding(.leading)
+                Text("·").foregroundColor(.secondary)
+                Text("\(proxy.tunLogLines.count) lines")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
                 Spacer()
-                Button("Clear") { proxy.tunLog = "" }
+                Button("Clear") { proxy.clearTunLog() }
                     .padding()
             }
         }
         .frame(width: 640, height: 420)
+        .onReceive(Timer.publish(every: 2, on: .main, in: .common).autoconnect()) { _ in
+            memoryMB = Self.currentMemoryMB()
+        }
+        .onAppear { memoryMB = Self.currentMemoryMB() }
+    }
+
+    static func currentMemoryMB() -> Double {
+        var info = mach_task_basic_info()
+        var count = mach_msg_type_number_t(
+            MemoryLayout<mach_task_basic_info>.size / MemoryLayout<integer_t>.size
+        )
+        let result = withUnsafeMutablePointer(to: &info) {
+            $0.withMemoryRebound(to: integer_t.self, capacity: Int(count)) {
+                task_info(mach_task_self_, task_flavor_t(MACH_TASK_BASIC_INFO), $0, &count)
+            }
+        }
+        guard result == KERN_SUCCESS else { return 0 }
+        return Double(info.resident_size) / 1_048_576
     }
 }
 

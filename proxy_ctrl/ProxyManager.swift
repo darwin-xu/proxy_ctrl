@@ -15,9 +15,15 @@ class ProxyManager: ObservableObject {
 
     @Published var currentMode: ProxyMode = .direct
     @Published var lastError: String? = nil
-    @Published var tunLog: String = ""
+    @Published var tunLogLines: [String] = []
 
     private var tunProcess: Process?
+    private var tunOutputPipe: Pipe?
+    private var tunErrorPipe: Pipe?
+    private let tunLogQueue = DispatchQueue(label: "proxy_ctrl.tunLog")
+    private var pendingText = ""
+    private var incompleteLine = ""
+    private var isFlushScheduled = false
 
     private var networkService: String {
         UserDefaults.standard.string(forKey: "networkService") ?? "Wi-Fi"
@@ -100,7 +106,7 @@ class ProxyManager: ObservableObject {
 
     func applyTun() {
         stopTun()
-        tunLog = ""
+        resetTunLog()
         guard let singBoxPath = resolveSingBoxPath() else {
             lastError = "sing-box not found. Checked common install paths and /usr/bin/which."
             return
@@ -121,11 +127,17 @@ class ProxyManager: ObservableObject {
         let errPipe = Pipe()
         proc.standardOutput = outPipe
         proc.standardError  = errPipe
+        tunOutputPipe = outPipe
+        tunErrorPipe = errPipe
 
         let append: (FileHandle) -> Void = { [weak self] handle in
             let data = handle.availableData
-            guard !data.isEmpty, let str = String(data: data, encoding: .utf8) else { return }
-            DispatchQueue.main.async { self?.tunLog += str }
+            guard !data.isEmpty else {
+                handle.readabilityHandler = nil
+                return
+            }
+            guard let str = String(data: data, encoding: .utf8) else { return }
+            self?.appendTunLog(str)
         }
         outPipe.fileHandleForReading.readabilityHandler = { append($0) }
         errPipe.fileHandleForReading.readabilityHandler = { append($0) }
@@ -134,6 +146,7 @@ class ProxyManager: ObservableObject {
             DispatchQueue.main.async {
                 guard let self else { return }
                 if self.currentMode == .tun { self.currentMode = .direct }
+                self.cleanupTunProcess()
             }
         }
 
@@ -146,9 +159,66 @@ class ProxyManager: ObservableObject {
         }
     }
 
+    func clearTunLog() {
+        resetTunLog()
+    }
+
     private func stopTun() {
         tunProcess?.terminate()
+        cleanupTunProcess()
+    }
+
+    private func cleanupTunProcess() {
+        tunOutputPipe?.fileHandleForReading.readabilityHandler = nil
+        tunErrorPipe?.fileHandleForReading.readabilityHandler = nil
+        tunOutputPipe = nil
+        tunErrorPipe = nil
         tunProcess = nil
+    }
+
+    private func resetTunLog() {
+        tunLogQueue.async { [weak self] in
+            guard let self else { return }
+            self.pendingText = ""
+            self.incompleteLine = ""
+            self.isFlushScheduled = false
+            DispatchQueue.main.async { [weak self] in
+                self?.tunLogLines = []
+            }
+        }
+    }
+
+    private func appendTunLog(_ text: String) {
+        tunLogQueue.async { [weak self] in
+            guard let self else { return }
+            self.pendingText += text
+
+            guard !self.isFlushScheduled else { return }
+            self.isFlushScheduled = true
+            self.tunLogQueue.asyncAfter(deadline: .now() + 0.3) { [weak self] in
+                guard let self else { return }
+                self.isFlushScheduled = false
+                self.flushPendingLog()
+            }
+        }
+    }
+
+    private func flushPendingLog() {
+        let text = incompleteLine + pendingText
+        pendingText = ""
+        incompleteLine = ""
+        guard !text.isEmpty else { return }
+
+        let segments = text.components(separatedBy: "\n")
+        let newLines = Array(segments.dropLast())
+        if !text.hasSuffix("\n") {
+            incompleteLine = segments.last ?? ""
+        }
+
+        guard !newLines.isEmpty else { return }
+        DispatchQueue.main.async { [weak self] in
+            self?.tunLogLines.append(contentsOf: newLines)
+        }
     }
 
     // MARK: - State detection
