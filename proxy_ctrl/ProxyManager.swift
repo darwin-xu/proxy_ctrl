@@ -196,7 +196,29 @@ class ProxyManager: ObservableObject {
     }
 
     private func stopTun() {
-        tunProcess?.terminate()
+        if let proc = tunProcess {
+            let sudoPID = proc.processIdentifier
+            // sudo -n without a TTY does not forward signals to its child, so
+            // sing-box must be killed directly by finding its PID via pgrep.
+            let pgrep = Process()
+            pgrep.executableURL = URL(fileURLWithPath: "/usr/bin/pgrep")
+            pgrep.arguments = ["-P", "\(sudoPID)"]
+            let pipe = Pipe()
+            pgrep.standardOutput = pipe
+            if (try? pgrep.run()) != nil {
+                pgrep.waitUntilExit()
+                let data = pipe.fileHandleForReading.readDataToEndOfFile()
+                if let output = String(data: data, encoding: .utf8),
+                   let childPID = Int(output.trimmingCharacters(in: .whitespacesAndNewlines)) {
+                    let kill = Process()
+                    kill.executableURL = URL(fileURLWithPath: "/usr/bin/sudo")
+                    kill.arguments = ["-n", "kill", "\(childPID)"]
+                    try? kill.run()
+                    kill.waitUntilExit()
+                }
+            }
+            proc.terminate()
+        }
         cleanupTunProcess()
     }
 

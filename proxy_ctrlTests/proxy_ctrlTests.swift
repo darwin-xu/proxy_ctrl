@@ -167,6 +167,7 @@ struct LineSplittingTests {
 
 // MARK: - Log Pipeline Integration
 
+@MainActor
 struct LogPipelineTests {
     @Test func appendSimpleLines() async throws {
         let manager = ProxyManager(forTesting: true)
