@@ -8,58 +8,6 @@
 import SwiftUI
 import UniformTypeIdentifiers
 
-// MARK: - Menu
-
-struct ProxyMenuView: View {
-    @EnvironmentObject var proxy: ProxyManager
-
-    var body: some View {
-        Toggle("http", isOn: Binding(
-            get: { proxy.currentMode == .http },
-            set: { if $0 { proxy.applyHTTP() } }
-        ))
-        Toggle("socks", isOn: Binding(
-            get: { proxy.currentMode == .socks },
-            set: { if $0 { proxy.applySOCKS() } }
-        ))
-        Menu("tun") {
-            if proxy.tunConfigs.isEmpty {
-                Text("No configs — add one in Settings")
-            } else {
-                ForEach(proxy.tunConfigs) { config in
-                    Toggle(config.name, isOn: Binding(
-                        get: { proxy.currentMode == .tun && proxy.activeTunConfig?.id == config.id },
-                        set: { on in
-                            if on { proxy.applyTun(config: config) }
-                            else  { proxy.applyDirect() }
-                        }
-                    ))
-                }
-            }
-        }
-        Toggle("direct", isOn: Binding(
-            get: { proxy.currentMode == .direct },
-            set: { if $0 { proxy.applyDirect() } }
-        ))
-
-        if let err = proxy.lastError {
-            Divider()
-            Text("⚠️ \(err)")
-                .foregroundColor(.red)
-        }
-
-        Divider()
-
-        Button("Settings…") {
-            // Small delay lets the status menu finish dismissing before
-            // the panel appears, avoiding a visual overlap.
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) {
-                SettingsWindowController.shared.showSettings()
-            }
-        }
-    }
-}
-
 // MARK: - Log
 
 struct LogView: View {

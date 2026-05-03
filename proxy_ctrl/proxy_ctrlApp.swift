@@ -5,21 +5,18 @@
 //  Created by Darwin Xu on 2026/4/10.
 //
 
+import AppKit
+import Combine
 import SwiftUI
 
 @main
 struct proxy_ctrlApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) var appDelegate
-    @StateObject private var proxy = ProxyManager.shared
 
     var body: some Scene {
-        MenuBarExtra {
-            ProxyMenuView()
-                .environmentObject(proxy)
-        } label: {
-            Image(systemName: proxy.currentMode == .direct ? "network" : "network.badge.shield.half.filled")
+        Settings {
+            EmptyView()
         }
-        .menuBarExtraStyle(.menu)
         .commands {
             CommandGroup(replacing: .appSettings) {
                 Button("Settings…") {
@@ -33,9 +30,12 @@ struct proxy_ctrlApp: App {
 
 class AppDelegate: NSObject, NSApplicationDelegate {
     private var stderrPipe: Pipe?
+    private var statusMenuController: ProxyStatusMenuController?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         installStderrFilter()
+        statusMenuController = ProxyStatusMenuController(proxy: .shared)
+        statusMenuController?.install()
         NSApp.setActivationPolicy(.accessory)
     }
 
@@ -65,6 +65,146 @@ class AppDelegate: NSObject, NSApplicationDelegate {
                 }
             }
         }
+    }
+}
+
+final class ProxyStatusMenuController: NSObject {
+    private let proxy: ProxyManager
+    private let statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
+    private var cancellables = Set<AnyCancellable>()
+
+    init(proxy: ProxyManager) {
+        self.proxy = proxy
+        super.init()
+    }
+
+    func install() {
+        updateStatusButton()
+        rebuildMenu()
+        proxy.objectWillChange
+            .receive(on: RunLoop.main)
+            .sink { [weak self] _ in
+                DispatchQueue.main.async {
+                    self?.updateStatusButton()
+                    self?.rebuildMenu()
+                }
+            }
+            .store(in: &cancellables)
+    }
+
+    private func updateStatusButton() {
+        guard let button = statusItem.button else { return }
+        let symbolName = proxy.currentMode == .direct ? "network" : "network.badge.shield.half.filled"
+        if let image = NSImage(systemSymbolName: symbolName, accessibilityDescription: "Proxy") {
+            image.isTemplate = true
+            button.image = image
+            button.imagePosition = .imageOnly
+            button.title = ""
+        } else {
+            button.image = nil
+            button.title = "Proxy"
+        }
+    }
+
+    private func rebuildMenu() {
+        let menu = NSMenu()
+        menu.autoenablesItems = false
+
+        menu.addItem(proxyItem(title: "http", mode: .http, action: #selector(selectHTTP(_:))))
+        menu.addItem(proxyItem(title: "socks", mode: .socks, action: #selector(selectSOCKS(_:))))
+        menu.addItem(tunMenuItem())
+        menu.addItem(proxyItem(title: "direct", mode: .direct, action: #selector(selectDirect(_:))))
+
+        if let error = proxy.lastError {
+            menu.addItem(.separator())
+            menu.addItem(errorItem(message: error))
+        }
+
+        menu.addItem(.separator())
+        menu.addItem(NSMenuItem(
+            title: "Settings…",
+            action: #selector(showSettings(_:)),
+            keyEquivalent: ""
+        ).configured(target: self))
+
+        statusItem.menu = menu
+    }
+
+    private func proxyItem(title: String, mode: ProxyMode, action: Selector) -> NSMenuItem {
+        NSMenuItem(title: title, action: action, keyEquivalent: "")
+            .configured(target: self, state: proxy.currentMode == mode ? .on : .off)
+    }
+
+    private func tunMenuItem() -> NSMenuItem {
+        let item = NSMenuItem(title: "tun", action: nil, keyEquivalent: "")
+        item.state = proxy.currentMode == .tun ? .on : .off
+
+        let submenu = NSMenu(title: "tun")
+        submenu.autoenablesItems = false
+        if proxy.tunConfigs.isEmpty {
+            let empty = NSMenuItem(title: "No configs - add one in Settings", action: nil, keyEquivalent: "")
+            empty.isEnabled = false
+            submenu.addItem(empty)
+        } else {
+            for config in proxy.tunConfigs {
+                let configItem = NSMenuItem(
+                    title: config.name,
+                    action: #selector(selectTunConfig(_:)),
+                    keyEquivalent: ""
+                )
+                configItem.target = self
+                configItem.representedObject = config.id.uuidString
+                configItem.state = proxy.currentMode == .tun && proxy.activeTunConfig?.id == config.id ? .on : .off
+                submenu.addItem(configItem)
+            }
+        }
+        item.submenu = submenu
+        return item
+    }
+
+    private func errorItem(message: String) -> NSMenuItem {
+        let item = NSMenuItem(title: "", action: nil, keyEquivalent: "")
+        item.attributedTitle = NSAttributedString(
+            string: "⚠️ \(message)",
+            attributes: [.foregroundColor: NSColor.systemRed]
+        )
+        item.isEnabled = false
+        return item
+    }
+
+    @objc private func selectHTTP(_ sender: NSMenuItem) {
+        proxy.applyHTTP()
+    }
+
+    @objc private func selectSOCKS(_ sender: NSMenuItem) {
+        proxy.applySOCKS()
+    }
+
+    @objc private func selectDirect(_ sender: NSMenuItem) {
+        proxy.applyDirect()
+    }
+
+    @objc private func selectTunConfig(_ sender: NSMenuItem) {
+        guard
+            let idString = sender.representedObject as? String,
+            let id = UUID(uuidString: idString),
+            let config = proxy.tunConfigs.first(where: { $0.id == id })
+        else { return }
+        proxy.applyTun(config: config)
+    }
+
+    @objc private func showSettings(_ sender: NSMenuItem) {
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) {
+            SettingsWindowController.shared.showSettings()
+        }
+    }
+}
+
+private extension NSMenuItem {
+    func configured(target: AnyObject, state: NSControl.StateValue = .off) -> NSMenuItem {
+        self.target = target
+        self.state = state
+        return self
     }
 }
 

@@ -157,11 +157,10 @@ class ProxyManager: ObservableObject {
     }
 
     func applyTun(config: TunConfig) {
-        activeTunConfig = config
-        startTun(rawPath: config.path)
+        startTun(rawPath: config.path, activeConfig: config)
     }
 
-    private func startTun(rawPath: String) {
+    private func startTun(rawPath: String, activeConfig: TunConfig? = nil) {
         stopTun()
         resetTunLog()
         let configPath = NSString(string: rawPath).expandingTildeInPath
@@ -211,6 +210,7 @@ class ProxyManager: ObservableObject {
         do {
             try proc.run()
             tunProcess = proc
+            activeTunConfig = activeConfig
             currentMode = .tun
         } catch {
             lastError = "Failed to start tun: \(error.localizedDescription)"
