@@ -221,7 +221,7 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
         hosting = NSHostingController(
             rootView: AnyView(SettingsView().environmentObject(ProxyManager.shared))
         )
-        let win = NSPanel(
+        let win = SettingsPanel(
             contentRect: .zero,
             styleMask: [.titled, .closable],
             backing: .buffered,
@@ -259,6 +259,13 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
         DispatchQueue.main.async {
             NSApp.setActivationPolicy(.accessory)
         }
+    }
+}
+
+final class SettingsPanel: NSPanel {
+    override func cancelOperation(_ sender: Any?) {
+        // Escape should not close the Settings window. Inline editors handle
+        // their own Escape behavior before the command reaches the panel.
     }
 }
 
