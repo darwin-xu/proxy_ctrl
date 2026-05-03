@@ -10,6 +10,17 @@ enum ProxyMode: String {
     case http, socks, tun, direct
 }
 
+struct TunConfig: Identifiable, Codable {
+    var id: UUID
+    var name: String
+    var path: String
+    init(id: UUID = UUID(), name: String, path: String) {
+        self.id = id
+        self.name = name
+        self.path = path
+    }
+}
+
 class ProxyManager: ObservableObject {
     static let shared = ProxyManager()
 
@@ -24,7 +35,9 @@ class ProxyManager: ObservableObject {
     var httpPortOverride: String?
     var socksHostOverride: String?
     var socksPortOverride: String?
-    var tunConfigPathOverride: String?
+    var tunConfigPathOverride: String?  // retained for testing only
+    @Published var tunConfigs: [TunConfig] = []
+    @Published var activeTunConfig: TunConfig? = nil
 
     /// Hook for testing; when non-nil, called instead of spawning real processes.
     var runWithAuthHandler: ((_ commands: [[String]], _ completion: @escaping () -> Void) -> Void)?
@@ -66,10 +79,6 @@ class ProxyManager: ObservableObject {
     private var socksPort: String {
         socksPortOverride ?? (UserDefaults.standard.string(forKey: "socksPort") ?? "7788")
     }
-    private var tunConfigPath: String {
-        tunConfigPathOverride ?? (UserDefaults.standard.string(forKey: "tunConfigPath") ?? "")
-    }
-
     private init() {
         UserDefaults.standard.register(defaults: [
             "networkService": "Wi-Fi",
@@ -77,8 +86,11 @@ class ProxyManager: ObservableObject {
             "httpPort": "8899",
             "socksHost": "192.168.2.201",
             "socksPort": "7788",
-            "tunConfigPath": "",
         ])
+        if let data = UserDefaults.standard.data(forKey: "tunConfigs"),
+           let saved = try? JSONDecoder().decode([TunConfig].self, from: data) {
+            tunConfigs = saved
+        }
         refreshCurrentMode()
     }
 
@@ -136,9 +148,23 @@ class ProxyManager: ObservableObject {
     }
 
     func applyTun() {
+        // No-arg variant used in tests via tunConfigPathOverride.
+        guard let path = tunConfigPathOverride else {
+            lastError = "Please choose a sing-box config file in Settings."
+            return
+        }
+        startTun(rawPath: path)
+    }
+
+    func applyTun(config: TunConfig) {
+        activeTunConfig = config
+        startTun(rawPath: config.path)
+    }
+
+    private func startTun(rawPath: String) {
         stopTun()
         resetTunLog()
-        let configPath = NSString(string: tunConfigPath).expandingTildeInPath
+        let configPath = NSString(string: rawPath).expandingTildeInPath
         guard !configPath.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
             lastError = "Please choose a sing-box config file in Settings."
             return
@@ -195,6 +221,22 @@ class ProxyManager: ObservableObject {
         resetTunLog()
     }
 
+    func addTunConfig(name: String, path: String) {
+        tunConfigs.append(TunConfig(name: name, path: path))
+        saveTunConfigs()
+    }
+
+    func removeTunConfig(id: UUID) {
+        tunConfigs.removeAll { $0.id == id }
+        saveTunConfigs()
+    }
+
+    func saveTunConfigs() {
+        if let data = try? JSONEncoder().encode(tunConfigs) {
+            UserDefaults.standard.set(data, forKey: "tunConfigs")
+        }
+    }
+
     private func stopTun() {
         if let proc = tunProcess {
             let sudoPID = proc.processIdentifier
@@ -228,6 +270,7 @@ class ProxyManager: ObservableObject {
         tunOutputPipe = nil
         tunErrorPipe = nil
         tunProcess = nil
+        activeTunConfig = nil
     }
 
     private func resetTunLog() {

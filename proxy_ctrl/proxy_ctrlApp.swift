@@ -74,9 +74,13 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 
 final class SettingsWindowController: NSWindowController, NSWindowDelegate {
     static let shared = SettingsWindowController()
+    private let hosting: NSHostingController<AnyView>
+    private var sizeObserver: NSKeyValueObservation?
 
     private init() {
-        let hosting = NSHostingController(rootView: SettingsView())
+        hosting = NSHostingController(
+            rootView: AnyView(SettingsView().environmentObject(ProxyManager.shared))
+        )
         let win = NSPanel(
             contentRect: .zero,
             styleMask: [.titled, .closable],
@@ -85,12 +89,17 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
         )
         win.title = "Settings"
         win.contentViewController = hosting
-        win.setContentSize(NSSize(width: 560, height: 620))
+        win.setContentSize(NSSize(width: 560, height: 100))
         win.center()
         win.hidesOnDeactivate = false
         win.collectionBehavior = [.moveToActiveSpace]
         super.init(window: win)
         win.delegate = self
+        sizeObserver = hosting.observe(\.preferredContentSize, options: [.new]) { [weak self] ctrl, _ in
+            let size = ctrl.preferredContentSize
+            guard size.width > 0, size.height > 0 else { return }
+            DispatchQueue.main.async { self?.window?.setContentSize(size) }
+        }
     }
 
     required init?(coder: NSCoder) { fatalError() }
