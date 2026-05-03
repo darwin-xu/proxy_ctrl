@@ -112,61 +112,65 @@ struct SettingsView: View {
                     }
                 }
                 Section("sing-box Configs") {
-                    ScrollView(.vertical) {
-                        LazyVStack(spacing: 0) {
-                            ForEach(proxy.tunConfigs.indices, id: \.self) { i in
-                                HStack(spacing: 8) {
-                                    TextField("", text: Binding(
-                                        get: { proxy.tunConfigs[i].name },
-                                        set: {
-                                            proxy.tunConfigs[i].name = $0
-                                            proxy.saveTunConfigs()
+                    VStack(alignment: .leading, spacing: 6) {
+                        ScrollView(.vertical) {
+                            LazyVStack(spacing: 0) {
+                                ForEach(proxy.tunConfigs.indices, id: \.self) { i in
+                                    HStack(spacing: 8) {
+                                        TextField("", text: Binding(
+                                            get: { proxy.tunConfigs[i].name },
+                                            set: {
+                                                proxy.tunConfigs[i].name = $0
+                                                proxy.saveTunConfigs()
+                                            }
+                                        ))
+                                        .frame(width: 120)
+                                        .textFieldStyle(.plain)
+                                        Text(proxy.tunConfigs[i].path)
+                                            .lineLimit(1)
+                                            .truncationMode(.middle)
+                                            .foregroundColor(.secondary)
+                                            .frame(maxWidth: .infinity, alignment: .leading)
+                                        Button("…") {
+                                            pickingConfigIndex = i
+                                            showingConfigPicker = true
                                         }
-                                    ))
-                                    .frame(width: 120)
-                                    .textFieldStyle(.plain)
-                                    Text(proxy.tunConfigs[i].path)
-                                        .lineLimit(1)
-                                        .truncationMode(.middle)
-                                        .foregroundColor(.secondary)
-                                        .frame(maxWidth: .infinity, alignment: .leading)
-                                    Button("…") {
-                                        pickingConfigIndex = i
-                                        showingConfigPicker = true
+                                        .buttonStyle(.borderless)
                                     }
-                                    .buttonStyle(.borderless)
+                                    .padding(.horizontal, 8)
+                                    .padding(.vertical, 5)
+                                    .background(
+                                        selectedConfigID == proxy.tunConfigs[i].id
+                                            ? Color.accentColor.opacity(0.2)
+                                            : Color.clear
+                                    )
+                                    .contentShape(Rectangle())
+                                    .onTapGesture {
+                                        selectedConfigID = proxy.tunConfigs[i].id
+                                    }
+                                    if i != proxy.tunConfigs.indices.last {
+                                        Divider()
+                                    }
                                 }
-                                .padding(.horizontal, 8)
-                                .padding(.vertical, 5)
-                                .background(
-                                    selectedConfigID == proxy.tunConfigs[i].id
-                                        ? Color.accentColor.opacity(0.2)
-                                        : Color.clear
-                                )
-                                .contentShape(Rectangle())
-                                .onTapGesture {
-                                    selectedConfigID = proxy.tunConfigs[i].id
-                                }
-                                Divider()
                             }
                         }
-                    }
-                    .frame(minHeight: 34, maxHeight: 170)
-                    .border(Color(nsColor: .separatorColor), width: 0.5)
-                    HStack(spacing: 4) {
-                        Button {
-                            pickingConfigIndex = nil
-                            showingConfigPicker = true
-                        } label: { Image(systemName: "plus") }
-                        .buttonStyle(.borderless)
-                        Button {
-                            if let id = selectedConfigID {
-                                proxy.removeTunConfig(id: id)
-                                selectedConfigID = nil
-                            }
-                        } label: { Image(systemName: "minus") }
-                        .buttonStyle(.borderless)
-                        .disabled(selectedConfigID == nil)
+                        .frame(minHeight: 34, maxHeight: 170)
+                        .border(Color(nsColor: .separatorColor), width: 0.5)
+                        HStack(spacing: 4) {
+                            Button {
+                                pickingConfigIndex = nil
+                                showingConfigPicker = true
+                            } label: { Image(systemName: "plus") }
+                            .buttonStyle(.borderless)
+                            Button {
+                                if let id = selectedConfigID {
+                                    proxy.removeTunConfig(id: id)
+                                    selectedConfigID = nil
+                                }
+                            } label: { Image(systemName: "minus") }
+                            .buttonStyle(.borderless)
+                            .disabled(selectedConfigID == nil)
+                        }
                     }
                 }
             }
