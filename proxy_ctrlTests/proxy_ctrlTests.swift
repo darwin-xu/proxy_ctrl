@@ -27,6 +27,28 @@ private func makeProxyManagerForTesting(
     return manager
 }
 
+private final class FakePowerAssertionProvider: PowerAssertionProviding {
+    var createResults: [Result<PowerAssertionToken, PowerAssertionCreationError>] = [.success(42)]
+    var createdReasons: [String] = []
+    var releasedTokens: [PowerAssertionToken] = []
+
+    func createKeepAwakeAssertion(reason: String) -> Result<PowerAssertionToken, PowerAssertionCreationError> {
+        createdReasons.append(reason)
+        return createResults.isEmpty ? .success(42) : createResults.removeFirst()
+    }
+
+    func releaseAssertion(_ token: PowerAssertionToken) {
+        releasedTokens.append(token)
+    }
+}
+
+private func makeAwakeDefaults() -> (String, UserDefaults) {
+    let suiteName = "proxy_ctrl.awake.tests.\(UUID().uuidString)"
+    let defaults = UserDefaults(suiteName: suiteName)!
+    defaults.removePersistentDomain(forName: suiteName)
+    return (suiteName, defaults)
+}
+
 // MARK: - ProxyMode
 
 struct ProxyModeTests {
@@ -44,6 +66,100 @@ struct ProxyModeTests {
         #expect(ProxyMode(rawValue: "direct") == .direct)
         #expect(ProxyMode(rawValue: "invalid") == nil)
         #expect(ProxyMode(rawValue: "") == nil)
+    }
+}
+
+// MARK: - Awake Controller
+
+@MainActor
+struct AwakeControllerTests {
+    @Test func enablingCreatesAssertionAndPersistsState() {
+        let (suiteName, defaults) = makeAwakeDefaults()
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let powerAssertions = FakePowerAssertionProvider()
+        let controller = AwakeController(
+            powerAssertions: powerAssertions,
+            defaults: defaults,
+            restoreSavedState: false
+        )
+
+        controller.setKeepingAwake(true)
+
+        #expect(controller.isKeepingAwake)
+        #expect(controller.errorMessage == nil)
+        #expect(powerAssertions.createdReasons == ["proxy_ctrl Keep Awake"])
+        #expect(defaults.bool(forKey: AwakeController.defaultsKey))
+    }
+
+    @Test func enablingTwiceDoesNotCreateDuplicateAssertion() {
+        let powerAssertions = FakePowerAssertionProvider()
+        let controller = AwakeController(
+            powerAssertions: powerAssertions,
+            defaults: nil,
+            restoreSavedState: false
+        )
+
+        controller.setKeepingAwake(true)
+        controller.setKeepingAwake(true)
+
+        #expect(controller.isKeepingAwake)
+        #expect(powerAssertions.createdReasons.count == 1)
+    }
+
+    @Test func disablingReleasesAssertionAndPersistsState() {
+        let (suiteName, defaults) = makeAwakeDefaults()
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let powerAssertions = FakePowerAssertionProvider()
+        let controller = AwakeController(
+            powerAssertions: powerAssertions,
+            defaults: defaults,
+            restoreSavedState: false
+        )
+
+        controller.setKeepingAwake(true)
+        controller.setKeepingAwake(false)
+
+        #expect(!controller.isKeepingAwake)
+        #expect(controller.errorMessage == nil)
+        #expect(powerAssertions.releasedTokens == [42])
+        #expect(!defaults.bool(forKey: AwakeController.defaultsKey))
+    }
+
+    @Test func failedAssertionLeavesControllerDisabled() {
+        let (suiteName, defaults) = makeAwakeDefaults()
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let powerAssertions = FakePowerAssertionProvider()
+        powerAssertions.createResults = [.failure(PowerAssertionCreationError(code: -1))]
+        let controller = AwakeController(
+            powerAssertions: powerAssertions,
+            defaults: defaults,
+            restoreSavedState: false
+        )
+
+        controller.setKeepingAwake(true)
+
+        #expect(!controller.isKeepingAwake)
+        #expect(controller.errorMessage != nil)
+        #expect(powerAssertions.releasedTokens.isEmpty)
+        #expect(!defaults.bool(forKey: AwakeController.defaultsKey))
+    }
+
+    @Test func terminationReleaseKeepsSavedPreference() {
+        let (suiteName, defaults) = makeAwakeDefaults()
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let powerAssertions = FakePowerAssertionProvider()
+        let controller = AwakeController(
+            powerAssertions: powerAssertions,
+            defaults: defaults,
+            restoreSavedState: false
+        )
+
+        controller.setKeepingAwake(true)
+        controller.releaseForTermination()
+
+        #expect(!controller.isKeepingAwake)
+        #expect(powerAssertions.releasedTokens == [42])
+        #expect(defaults.bool(forKey: AwakeController.defaultsKey))
     }
 }
 

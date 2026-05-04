@@ -34,9 +34,13 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         installStderrFilter()
-        statusMenuController = ProxyStatusMenuController(proxy: .shared)
+        statusMenuController = ProxyStatusMenuController(proxy: .shared, awakeController: .shared)
         statusMenuController?.install()
         NSApp.setActivationPolicy(.accessory)
+    }
+
+    func applicationWillTerminate(_ notification: Notification) {
+        AwakeController.shared.releaseForTermination()
     }
 
     /// Redirect stderr through a pipe and drop lines containing known
@@ -70,11 +74,13 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 
 final class ProxyStatusMenuController: NSObject {
     private let proxy: ProxyManager
+    private let awakeController: AwakeController
     private let statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
     private var cancellables = Set<AnyCancellable>()
 
-    init(proxy: ProxyManager) {
+    init(proxy: ProxyManager, awakeController: AwakeController) {
         self.proxy = proxy
+        self.awakeController = awakeController
         super.init()
     }
 
@@ -86,6 +92,14 @@ final class ProxyStatusMenuController: NSObject {
             .sink { [weak self] _ in
                 DispatchQueue.main.async {
                     self?.updateStatusButton()
+                    self?.rebuildMenu()
+                }
+            }
+            .store(in: &cancellables)
+        awakeController.objectWillChange
+            .receive(on: RunLoop.main)
+            .sink { [weak self] _ in
+                DispatchQueue.main.async {
                     self?.rebuildMenu()
                 }
             }
@@ -110,13 +124,34 @@ final class ProxyStatusMenuController: NSObject {
         let menu = NSMenu()
         menu.autoenablesItems = false
 
-        menu.addItem(proxyItem(title: "http", mode: .http, action: #selector(selectHTTP(_:))))
-        menu.addItem(proxyItem(title: "socks", mode: .socks, action: #selector(selectSOCKS(_:))))
+        menu.addItem(proxyItem(
+            title: "http",
+            mode: .http,
+            action: #selector(selectHTTP(_:)),
+            symbolNames: ["arrow.triangle.branch", "globe"]
+        ))
+        menu.addItem(proxyItem(
+            title: "socks",
+            mode: .socks,
+            action: #selector(selectSOCKS(_:)),
+            symbolNames: ["poweroutlet.type.a", "cable.connector.horizontal", "powerplug", "network"]
+        ))
         menu.addItem(tunMenuItem())
-        menu.addItem(proxyItem(title: "direct", mode: .direct, action: #selector(selectDirect(_:))))
+        menu.addItem(proxyItem(
+            title: "direct",
+            mode: .direct,
+            action: #selector(selectDirect(_:)),
+            symbolNames: ["arrow.right"]
+        ))
 
         if let error = proxy.lastError {
             menu.addItem(.separator())
+            menu.addItem(errorItem(message: error))
+        }
+
+        menu.addItem(.separator())
+        menu.addItem(keepAwakeItem())
+        if let error = awakeController.errorMessage {
             menu.addItem(errorItem(message: error))
         }
 
@@ -125,19 +160,38 @@ final class ProxyStatusMenuController: NSObject {
             title: "Settings…",
             action: #selector(showSettings(_:)),
             keyEquivalent: ""
-        ).configured(target: self))
+        ).configured(target: self, symbolNames: ["gearshape"]))
 
         statusItem.menu = menu
     }
 
-    private func proxyItem(title: String, mode: ProxyMode, action: Selector) -> NSMenuItem {
+    private func proxyItem(
+        title: String,
+        mode: ProxyMode,
+        action: Selector,
+        symbolNames: [String]
+    ) -> NSMenuItem {
         NSMenuItem(title: title, action: action, keyEquivalent: "")
-            .configured(target: self, state: proxy.currentMode == mode ? .on : .off)
+            .configured(
+                target: self,
+                state: proxy.currentMode == mode ? .on : .off,
+                symbolNames: symbolNames
+            )
+    }
+
+    private func keepAwakeItem() -> NSMenuItem {
+        NSMenuItem(title: "Keep Awake", action: #selector(toggleKeepAwake(_:)), keyEquivalent: "")
+            .configured(
+                target: self,
+                state: awakeController.isKeepingAwake ? .on : .off,
+                symbolNames: ["lightbulb.max.fill", "lightbulb.max", "lightbulb.fill"]
+            )
     }
 
     private func tunMenuItem() -> NSMenuItem {
         let item = NSMenuItem(title: "tun", action: nil, keyEquivalent: "")
         item.state = proxy.currentMode == .tun ? .on : .off
+        item.setSymbolImage(named: ["tram.fill.tunnel", "pipe.and.drop", "network.badge.shield.half.filled", "network"])
 
         let submenu = NSMenu(title: "tun")
         submenu.autoenablesItems = false
@@ -155,6 +209,7 @@ final class ProxyStatusMenuController: NSObject {
                 configItem.target = self
                 configItem.representedObject = config.id.uuidString
                 configItem.state = proxy.currentMode == .tun && proxy.activeTunConfig?.id == config.id ? .on : .off
+                configItem.setSymbolImage(named: ["doc.text"])
                 submenu.addItem(configItem)
             }
         }
@@ -193,6 +248,10 @@ final class ProxyStatusMenuController: NSObject {
         proxy.applyTun(config: config)
     }
 
+    @objc private func toggleKeepAwake(_ sender: NSMenuItem) {
+        awakeController.toggleKeepingAwake()
+    }
+
     @objc private func showSettings(_ sender: NSMenuItem) {
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) {
             SettingsWindowController.shared.showSettings()
@@ -201,10 +260,26 @@ final class ProxyStatusMenuController: NSObject {
 }
 
 private extension NSMenuItem {
-    func configured(target: AnyObject, state: NSControl.StateValue = .off) -> NSMenuItem {
+    func configured(
+        target: AnyObject,
+        state: NSControl.StateValue = .off,
+        symbolNames: [String] = []
+    ) -> NSMenuItem {
         self.target = target
         self.state = state
+        setSymbolImage(named: symbolNames)
         return self
+    }
+
+    func setSymbolImage(named symbolNames: [String]) {
+        for symbolName in symbolNames {
+            if let image = NSImage(systemSymbolName: symbolName, accessibilityDescription: title) {
+                image.isTemplate = true
+                self.image = image
+                return
+            }
+        }
+        image = nil
     }
 }
 
@@ -235,10 +310,11 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
         win.collectionBehavior = [.moveToActiveSpace]
         super.init(window: win)
         win.delegate = self
-        sizeObserver = hosting.observe(\.preferredContentSize, options: [.new]) { [weak self] ctrl, _ in
-            let size = ctrl.preferredContentSize
-            guard size.width > 0, size.height > 0 else { return }
-            DispatchQueue.main.async { self?.window?.setContentSize(size) }
+        sizeObserver = hosting.observe(\.preferredContentSize, options: [.new]) { [weak self] _, change in
+            guard let size = change.newValue, size.width > 0, size.height > 0 else { return }
+            DispatchQueue.main.async {
+                self?.applyPreferredContentSize(size)
+            }
         }
     }
 
@@ -259,6 +335,15 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
         DispatchQueue.main.async {
             NSApp.setActivationPolicy(.accessory)
         }
+    }
+
+    private func applyPreferredContentSize(_ size: NSSize) {
+        guard let window else { return }
+        let current = window.contentView?.bounds.size ?? .zero
+        guard abs(current.width - size.width) > 0.5 || abs(current.height - size.height) > 0.5 else {
+            return
+        }
+        window.setContentSize(size)
     }
 }
 
