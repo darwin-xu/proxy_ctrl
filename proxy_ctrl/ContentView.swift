@@ -69,7 +69,6 @@ struct LogView: View {
 
 struct SettingsView: View {
     @EnvironmentObject private var proxy: ProxyManager
-    @ObservedObject private var awakeController = AwakeController.shared
     @AppStorage("networkService") private var networkService = "Wi-Fi"
     @AppStorage("httpHost")       private var httpHost       = "192.168.2.223"
     @AppStorage("httpPort")       private var httpPort       = "8899"
@@ -93,17 +92,6 @@ struct SettingsView: View {
                         TextField("e.g. Wi-Fi", text: $networkService)
                             .textFieldStyle(.roundedBorder)
                             .frame(maxWidth: 200)
-                    }
-                }
-                Section("Power") {
-                    Toggle("Keep Awake", isOn: Binding(
-                        get: { awakeController.isKeepingAwake },
-                        set: { awakeController.setKeepingAwake($0) }
-                    ))
-                    if let error = awakeController.errorMessage {
-                        Text(error)
-                            .font(.caption)
-                            .foregroundColor(.red)
                     }
                 }
                 Section("HTTP/HTTPS Proxy") {
