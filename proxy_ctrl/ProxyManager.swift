@@ -36,6 +36,8 @@ class ProxyManager: ObservableObject {
     var socksHostOverride: String?
     var socksPortOverride: String?
     var tunConfigPathOverride: String?  // retained for testing only
+    var singBoxPathOverride: String?
+    var sudoPathOverride: String?
     @Published var tunConfigs: [TunConfig] = []
     @Published var activeTunConfig: TunConfig? = nil
 
@@ -52,11 +54,11 @@ class ProxyManager: ObservableObject {
 
     // MARK: - Pure helpers (testable)
 
-    static func stripANSI(_ str: String) -> String {
+    nonisolated static func stripANSI(_ str: String) -> String {
         str.replacingOccurrences(of: "\\e\\[[0-9;]*m", with: "", options: .regularExpression)
     }
 
-    static func splitLines(_ text: String) -> (lines: [String], remainder: String) {
+    nonisolated static func splitLines(_ text: String) -> (lines: [String], remainder: String) {
         guard !text.isEmpty else { return ([], "") }
         let segments = text.components(separatedBy: "\n")
         let lines = Array(segments.dropLast())
@@ -177,7 +179,7 @@ class ProxyManager: ObservableObject {
             return
         }
         let proc = Process()
-        proc.executableURL = URL(fileURLWithPath: "/usr/bin/sudo")
+        proc.executableURL = URL(fileURLWithPath: sudoPath)
         proc.arguments = ["-n", singBoxPath, "run", "-c", configPath]
         let outPipe = Pipe()
         let errPipe = Pipe()
@@ -199,9 +201,12 @@ class ProxyManager: ObservableObject {
         outPipe.fileHandleForReading.readabilityHandler = { append($0) }
         errPipe.fileHandleForReading.readabilityHandler = { append($0) }
 
-        proc.terminationHandler = { [weak self] _ in
+        proc.terminationHandler = { [weak self] terminatedProcess in
             DispatchQueue.main.async {
                 guard let self else { return }
+                guard self.tunProcess?.processIdentifier == terminatedProcess.processIdentifier else {
+                    return
+                }
                 if self.currentMode == .tun { self.currentMode = .direct }
                 self.cleanupTunProcess()
             }
@@ -250,10 +255,10 @@ class ProxyManager: ObservableObject {
             if (try? pgrep.run()) != nil {
                 pgrep.waitUntilExit()
                 let data = pipe.fileHandleForReading.readDataToEndOfFile()
-                if let output = String(data: data, encoding: .utf8),
-                   let childPID = Int(output.trimmingCharacters(in: .whitespacesAndNewlines)) {
+                let output = String(data: data, encoding: .utf8) ?? ""
+                for childPID in Self.parseProcessIDs(output) {
                     let kill = Process()
-                    kill.executableURL = URL(fileURLWithPath: "/usr/bin/sudo")
+                    kill.executableURL = URL(fileURLWithPath: sudoPath)
                     kill.arguments = ["-n", "kill", "\(childPID)"]
                     try? kill.run()
                     kill.waitUntilExit()
@@ -343,6 +348,10 @@ class ProxyManager: ObservableObject {
 
     /// Resolve sing-box by absolute path so sudo does not depend on PATH.
     func resolveSingBoxPath() -> String? {
+        if let override = singBoxPathOverride {
+            let path = NSString(string: override).expandingTildeInPath
+            return FileManager.default.isExecutableFile(atPath: path) ? path : nil
+        }
         let candidates = [
             "/opt/homebrew/bin/sing-box",
             "/usr/local/bin/sing-box",
@@ -358,6 +367,16 @@ class ProxyManager: ObservableObject {
             return found
         }
         return nil
+    }
+
+    nonisolated static func parseProcessIDs(_ output: String) -> [Int32] {
+        output
+            .split(whereSeparator: \.isNewline)
+            .compactMap { Int32($0.trimmingCharacters(in: .whitespacesAndNewlines)) }
+    }
+
+    private var sudoPath: String {
+        sudoPathOverride ?? "/usr/bin/sudo"
     }
 
     /// Run multiple networksetup commands directly.

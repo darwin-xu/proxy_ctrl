@@ -9,6 +9,7 @@ import Testing
 import Foundation
 @testable import proxy_ctrl
 
+@MainActor
 private func makeProxyManagerForTesting(
     networkService: String = "Test Network",
     httpHost: String = "203.0.113.10",
@@ -47,6 +48,20 @@ private func makeAwakeDefaults() -> (String, UserDefaults) {
     let defaults = UserDefaults(suiteName: suiteName)!
     defaults.removePersistentDomain(forName: suiteName)
     return (suiteName, defaults)
+}
+
+private func makeExecutableScript(in directory: URL, name: String, body: String) throws -> URL {
+    let url = directory.appendingPathComponent(name)
+    try body.write(to: url, atomically: true, encoding: .utf8)
+    try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: url.path)
+    return url
+}
+
+private func makeTemporaryDirectory() throws -> URL {
+    let url = FileManager.default.temporaryDirectory
+        .appendingPathComponent("proxy_ctrl_tests_\(UUID().uuidString)", isDirectory: true)
+    try FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
+    return url
 }
 
 // MARK: - ProxyMode
@@ -392,6 +407,7 @@ struct LogPipelineTests {
 
 // MARK: - applyTun Validation
 
+@MainActor
 struct ApplyTunValidationTests {
     @Test func emptyConfigPathShowsError() {
         let manager = makeProxyManagerForTesting(tunConfigPath: "")
@@ -433,6 +449,7 @@ struct ApplyTunValidationTests {
 
 // MARK: - Initial State
 
+@MainActor
 struct InitialStateTests {
     @Test func testingInitDefaultState() {
         let manager = ProxyManager(forTesting: true)
@@ -491,6 +508,7 @@ struct CombinedProcessingTests {
 
 // MARK: - resolveSingBoxPath
 
+@MainActor
 struct ResolveSingBoxPathTests {
     @Test func findsInstalledSingBox() {
         let manager = ProxyManager(forTesting: true)
@@ -512,6 +530,7 @@ struct ResolveSingBoxPathTests {
 
 // MARK: - readCommand
 
+@MainActor
 struct ReadCommandTests {
     @Test func validCommand() {
         let manager = ProxyManager(forTesting: true)
@@ -532,8 +551,21 @@ struct ReadCommandTests {
     }
 }
 
+// MARK: - process id parsing
+
+struct ProcessIDParsingTests {
+    @Test func parsesMultiplePIDsFromPgrepOutput() {
+        #expect(ProxyManager.parseProcessIDs("123\n456\n") == [123, 456])
+    }
+
+    @Test func ignoresInvalidPIDLines() {
+        #expect(ProxyManager.parseProcessIDs("123\nnot-a-pid\n 789 \n") == [123, 789])
+    }
+}
+
 // MARK: - applyTun with valid config but no sudo
 
+@MainActor
 struct ApplyTunProcessTests {
     @Test func validConfigNoSudoSetsError() throws {
         // Create a temporary config file
@@ -555,6 +587,7 @@ struct ApplyTunProcessTests {
 
 // MARK: - Mode transitions
 
+@MainActor
 struct ModeTransitionTests {
     @Test func initialModeIsDirect() {
         let manager = ProxyManager(forTesting: true)
@@ -585,6 +618,7 @@ struct ModeTransitionTests {
 
 // MARK: - applyHTTP / applySOCKS / applyDirect via runWithAuthHandler
 
+@MainActor
 struct ApplyHTTPTests {
     @Test func buildsCorrectCommands() {
         let manager = makeProxyManagerForTesting()
@@ -631,6 +665,7 @@ struct ApplyHTTPTests {
     }
 }
 
+@MainActor
 struct ApplySOCKSTests {
     @Test func buildsCorrectCommands() {
         let manager = makeProxyManagerForTesting()
@@ -677,6 +712,7 @@ struct ApplySOCKSTests {
     }
 }
 
+@MainActor
 struct ApplyDirectTests {
     @Test func buildsCorrectCommands() {
         let manager = makeProxyManagerForTesting()
@@ -710,6 +746,7 @@ struct ApplyDirectTests {
 
 // MARK: - tunConfigPath override
 
+@MainActor
 struct TunConfigPathTests {
     @Test func emptyOverrideShowsValidationError() {
         let manager = makeProxyManagerForTesting(tunConfigPath: "")
@@ -720,6 +757,7 @@ struct TunConfigPathTests {
 
 // MARK: - stopTun via apply methods
 
+@MainActor
 struct StopTunViaApplyTests {
     @Test func applyHTTPStopsPreviousTun() {
         let manager = makeProxyManagerForTesting()
@@ -743,5 +781,54 @@ struct StopTunViaApplyTests {
         manager.runWithAuthHandler = { _, completion in completion() }
         manager.applyDirect()
         #expect(manager.currentMode == .direct)
+    }
+
+    @Test func switchingTunConfigsKeepsNewTunTracked() async throws {
+        let directory = try makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+
+        let fakeSudo = try makeExecutableScript(
+            in: directory,
+            name: "sudo",
+            body: """
+            #!/bin/sh
+            if [ "$1" = "-n" ]; then
+              shift
+            fi
+            exec "$@"
+            """
+        )
+        let fakeSingBox = try makeExecutableScript(
+            in: directory,
+            name: "sing-box",
+            body: """
+            #!/bin/sh
+            exec /bin/sleep 60
+            """
+        )
+        let firstConfigURL = directory.appendingPathComponent("first.json")
+        let secondConfigURL = directory.appendingPathComponent("second.json")
+        try "{}".write(to: firstConfigURL, atomically: true, encoding: .utf8)
+        try "{}".write(to: secondConfigURL, atomically: true, encoding: .utf8)
+
+        let manager = ProxyManager(forTesting: true)
+        manager.sudoPathOverride = fakeSudo.path
+        manager.singBoxPathOverride = fakeSingBox.path
+        let firstConfig = TunConfig(name: "first", path: firstConfigURL.path)
+        let secondConfig = TunConfig(name: "second", path: secondConfigURL.path)
+        defer {
+            manager.runWithAuthHandler = { _, completion in completion() }
+            manager.applyDirect()
+        }
+
+        manager.applyTun(config: firstConfig)
+        #expect(manager.currentMode == .tun)
+        #expect(manager.activeTunConfig?.id == firstConfig.id)
+
+        manager.applyTun(config: secondConfig)
+        try await Task.sleep(for: .milliseconds(300))
+
+        #expect(manager.currentMode == .tun)
+        #expect(manager.activeTunConfig?.id == secondConfig.id)
     }
 }
