@@ -189,13 +189,13 @@ final class ProxyStatusMenuController: NSObject {
             ).configured(
                 target: self,
                 state: .on,
-                symbolNames: ["lightbulb.max.fill", "lightbulb.max", "lightbulb.fill"]
+                symbolNames: ["lightbulb.max", "lightbulb.fill"]
             )
         }
 
         let item = NSMenuItem(title: awakeController.keepAwakeMenuTitle, action: nil, keyEquivalent: "")
         item.state = awakeController.isKeepingAwake ? .on : .off
-        item.setSymbolImage(named: ["lightbulb.max.fill", "lightbulb.max", "lightbulb.fill"])
+        item.setSymbolImage(named: ["lightbulb"])
 
         let submenu = NSMenu(title: "Keep Awake")
         submenu.autoenablesItems = false
