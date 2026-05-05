@@ -176,6 +176,67 @@ struct AwakeControllerTests {
         #expect(powerAssertions.releasedTokens == [42])
         #expect(defaults.bool(forKey: AwakeController.defaultsKey))
     }
+
+    @Test func durationParsingRequiresPositiveHHMM() {
+        #expect(AwakeController.parseDuration("01:30") == 5_400)
+        #expect(AwakeController.parseDuration("1:05") == 3_900)
+        #expect(AwakeController.parseDuration("00:00") == nil)
+        #expect(AwakeController.parseDuration("00:60") == nil)
+        #expect(AwakeController.parseDuration("abc") == nil)
+    }
+
+    @Test func clockTimeParsingUsesTomorrowForPastTimes() throws {
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = TimeZone(secondsFromGMT: 0)!
+        let now = try #require(calendar.date(from: DateComponents(
+            timeZone: calendar.timeZone,
+            year: 2026,
+            month: 5,
+            day: 5,
+            hour: 18,
+            minute: 30
+        )))
+
+        let future = try #require(AwakeController.targetDate(forClockTime: "19:10", now: now, calendar: calendar))
+        let tomorrow = try #require(AwakeController.targetDate(forClockTime: "17:10", now: now, calendar: calendar))
+
+        #expect(calendar.component(.day, from: future) == 5)
+        #expect(calendar.component(.hour, from: future) == 19)
+        #expect(calendar.component(.minute, from: future) == 10)
+        #expect(calendar.component(.day, from: tomorrow) == 6)
+        #expect(calendar.component(.hour, from: tomorrow) == 17)
+        #expect(calendar.component(.minute, from: tomorrow) == 10)
+    }
+
+    @Test func timedKeepAwakeUsesExpirationAndDoesNotPersist() throws {
+        let (suiteName, defaults) = makeAwakeDefaults()
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let powerAssertions = FakePowerAssertionProvider()
+        let now = try #require(Calendar.current.date(from: DateComponents(
+            year: 2026,
+            month: 5,
+            day: 5,
+            hour: 10,
+            minute: 0
+        )))
+        let controller = AwakeController(
+            powerAssertions: powerAssertions,
+            defaults: defaults,
+            restoreSavedState: false,
+            nowProvider: { now }
+        )
+
+        controller.keepAwake(for: 90 * 60)
+
+        #expect(controller.isKeepingAwake)
+        #expect(controller.remainingTimeText() == "01:30")
+        #expect(!defaults.bool(forKey: AwakeController.defaultsKey))
+        if case .duration = controller.mode {
+            #expect(true)
+        } else {
+            Issue.record("Expected duration keep-awake mode.")
+        }
+    }
 }
 
 // MARK: - ANSI Stripping

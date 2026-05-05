@@ -24,8 +24,8 @@ struct LogView: View {
                 ScrollViewReader { reader in
                     ScrollView {
                         LazyVStack(alignment: .leading, spacing: 0) {
-                            ForEach(0..<proxy.tunLogLines.count, id: \.self) { index in
-                                Text(proxy.tunLogLines[index])
+                            ForEach(Array(proxy.tunLogLines.enumerated()), id: \.offset) { _, line in
+                                Text(line)
                                     .font(.system(.caption, design: .monospaced))
                             }
                         }
