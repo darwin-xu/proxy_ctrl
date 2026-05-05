@@ -470,18 +470,11 @@ final class ProxyStatusMenuController: NSObject {
 private enum TimeSelectionDialogKind: Equatable {
     case duration
     case until
-
-    var frameOriginKey: String {
-        switch self {
-        case .duration:
-            "keepAwakeDurationDialogOrigin"
-        case .until:
-            "keepAwakeUntilDialogOrigin"
-        }
-    }
 }
 
 private final class TimeSelectionWindowController: NSWindowController, NSWindowDelegate {
+    private static let frameOriginKey = "keepAwakeTimeDialogOrigin"
+
     let kind: TimeSelectionDialogKind
     var onClose: (() -> Void)?
 
@@ -489,6 +482,7 @@ private final class TimeSelectionWindowController: NSWindowController, NSWindowD
     private let completion: (Int, Int) -> Void
     private let previousActivationPolicy: NSApplication.ActivationPolicy
     private var restoresActivationPolicyOnClose = true
+    private var isRestoringWindowFrame = false
 
     init(
         kind: TimeSelectionDialogKind,
@@ -524,6 +518,7 @@ private final class TimeSelectionWindowController: NSWindowController, NSWindowD
 
         super.init(window: panel)
 
+        shouldCascadeWindows = false
         panel.delegate = self
         configureContent(message: message)
     }
@@ -532,9 +527,13 @@ private final class TimeSelectionWindowController: NSWindowController, NSWindowD
 
     func show() {
         NSApp.setActivationPolicy(.regular)
-        restoreWindowPosition()
-        showWindow(nil)
+        restoreWindowFrame()
         bringToFront()
+        DispatchQueue.main.async { [weak self] in
+            guard let self else { return }
+            self.restoreWindowFrame()
+            self.bringToFront()
+        }
     }
 
     func bringToFront() {
@@ -553,6 +552,7 @@ private final class TimeSelectionWindowController: NSWindowController, NSWindowD
     }
 
     func windowDidMove(_ notification: Notification) {
+        guard !isRestoringWindowFrame else { return }
         saveWindowPosition()
     }
 
@@ -625,13 +625,16 @@ private final class TimeSelectionWindowController: NSWindowController, NSWindowD
         close()
     }
 
-    private func restoreWindowPosition() {
+    private func restoreWindowFrame() {
         guard let window else { return }
-        guard let origin = Self.savedOrigin(for: kind.frameOriginKey) else {
+        guard let origin = Self.savedOrigin(for: Self.frameOriginKey) else {
             window.center()
             return
         }
+
+        isRestoringWindowFrame = true
         window.setFrameOrigin(Self.constrainedOrigin(origin, for: window.frame.size))
+        isRestoringWindowFrame = false
     }
 
     private func saveWindowPosition() {
@@ -639,7 +642,7 @@ private final class TimeSelectionWindowController: NSWindowController, NSWindowD
         let origin = window.frame.origin
         UserDefaults.standard.set(
             ["x": Double(origin.x), "y": Double(origin.y)],
-            forKey: kind.frameOriginKey
+            forKey: Self.frameOriginKey
         )
     }
 
