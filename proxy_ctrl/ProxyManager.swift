@@ -21,6 +21,26 @@ struct TunConfig: Identifiable, Codable {
     }
 }
 
+struct CommandResult: Equatable {
+    let exitCode: Int32
+    let output: String
+    let errorOutput: String
+
+    var succeeded: Bool {
+        exitCode == 0
+    }
+
+    var failureMessage: String {
+        let message = errorOutput.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !message.isEmpty { return message }
+
+        let output = output.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !output.isEmpty { return output }
+
+        return "Command exited with status \(exitCode)."
+    }
+}
+
 class ProxyManager: ObservableObject {
     static let shared = ProxyManager()
 
@@ -36,21 +56,17 @@ class ProxyManager: ObservableObject {
     var socksHostOverride: String?
     var socksPortOverride: String?
     var tunConfigPathOverride: String?  // retained for testing only
-    var singBoxPathOverride: String?
     var sudoPathOverride: String?
+    var launchctlPathOverride: String?
+    var singBoxServiceLabelOverride: String?
+    var singBoxConfigLinkPathOverride: String?
+    var singBoxLogPathOverride: String?
     @Published var tunConfigs: [TunConfig] = []
     @Published var activeTunConfig: TunConfig? = nil
 
     /// Hook for testing; when non-nil, called instead of spawning real processes.
     var runWithAuthHandler: ((_ commands: [[String]], _ completion: @escaping () -> Void) -> Void)?
-
-    private var tunProcess: Process?
-    private var tunOutputPipe: Pipe?
-    private var tunErrorPipe: Pipe?
-    private let tunLogQueue = DispatchQueue(label: "proxy_ctrl.tunLog")
-    private var pendingChunks: [String] = []
-    private var incompleteLine = ""
-    private var isFlushScheduled = false
+    var privilegedCommandHandler: ((_ arguments: [String]) -> CommandResult)?
 
     // MARK: - Pure helpers (testable)
 
@@ -64,6 +80,20 @@ class ProxyManager: ObservableObject {
         let lines = Array(segments.dropLast())
         let remainder = text.hasSuffix("\n") ? "" : (segments.last ?? "")
         return (lines, remainder)
+    }
+
+    nonisolated static func readLogFile(at path: String, maxBytes: UInt64) throws -> String {
+        let url = URL(fileURLWithPath: path)
+        let handle = try FileHandle(forReadingFrom: url)
+        defer { try? handle.close() }
+
+        let size = (try? FileManager.default.attributesOfItem(atPath: path)[.size] as? NSNumber)?
+            .uint64Value ?? 0
+        if size > maxBytes {
+            try handle.seek(toOffset: size - maxBytes)
+        }
+        let data = try handle.readToEnd() ?? Data()
+        return String(data: data, encoding: .utf8) ?? String(decoding: data, as: UTF8.self)
     }
 
     private var networkService: String {
@@ -80,6 +110,21 @@ class ProxyManager: ObservableObject {
     }
     private var socksPort: String {
         socksPortOverride ?? (UserDefaults.standard.string(forKey: "socksPort") ?? "7788")
+    }
+    private var singBoxServiceLabel: String {
+        singBoxServiceLabelOverride ?? "io.sing-box"
+    }
+    private var launchctlPath: String {
+        launchctlPathOverride ?? "/bin/launchctl"
+    }
+    private var singBoxConfigLinkPath: String {
+        singBoxConfigLinkPathOverride ?? "/Users/darwin/projects/scripts/sing-box/config.json"
+    }
+    private var singBoxLogPath: String {
+        singBoxLogPathOverride ?? "/var/log/sing-box.log"
+    }
+    private var sudoPath: String {
+        sudoPathOverride ?? "/usr/bin/sudo"
     }
     private init() {
         UserDefaults.standard.register(defaults: [
@@ -104,7 +149,7 @@ class ProxyManager: ObservableObject {
     // MARK: - Proxy actions (each batches into a single auth prompt)
 
     func applyHTTP() {
-        stopTun()
+        let stopError = stopTun()
         let svc = networkService
         let webHost = httpHost
         let webPort = httpPort
@@ -116,11 +161,16 @@ class ProxyManager: ObservableObject {
             ["-setsocksfirewallproxy",      svc, "", "0"],
             ["-setsocksfirewallproxystate", svc, "off"],
         ]
-        runWithAuth(cmds) { self.currentMode = .http }
+        runWithAuth(cmds) {
+            self.currentMode = .http
+            if self.lastError == nil {
+                self.lastError = stopError
+            }
+        }
     }
 
     func applySOCKS() {
-        stopTun()
+        let stopError = stopTun()
         let svc = networkService
         let host = socksHost
         let port = socksPort
@@ -132,11 +182,16 @@ class ProxyManager: ObservableObject {
             ["-setwebproxystate",           svc, "off"],
             ["-setsecurewebproxystate",     svc, "off"],
         ]
-        runWithAuth(cmds) { self.currentMode = .socks }
+        runWithAuth(cmds) {
+            self.currentMode = .socks
+            if self.lastError == nil {
+                self.lastError = stopError
+            }
+        }
     }
 
     func applyDirect() {
-        stopTun()
+        let stopError = stopTun()
         let svc = networkService
         let cmds: [[String]] = [
             ["-setwebproxy",                svc, "", "0"],
@@ -146,7 +201,12 @@ class ProxyManager: ObservableObject {
             ["-setsecurewebproxystate",     svc, "off"],
             ["-setsocksfirewallproxystate", svc, "off"],
         ]
-        runWithAuth(cmds) { self.currentMode = .direct }
+        runWithAuth(cmds) {
+            self.currentMode = .direct
+            if self.lastError == nil {
+                self.lastError = stopError
+            }
+        }
     }
 
     func applyTun() {
@@ -163,8 +223,6 @@ class ProxyManager: ObservableObject {
     }
 
     private func startTun(rawPath: String, activeConfig: TunConfig? = nil) {
-        stopTun()
-        resetTunLog()
         let configPath = NSString(string: rawPath).expandingTildeInPath
         guard !configPath.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
             lastError = "Please choose a sing-box config file in Settings."
@@ -174,56 +232,52 @@ class ProxyManager: ObservableObject {
             lastError = "sing-box config file not found: \(configPath)"
             return
         }
-        guard let singBoxPath = resolveSingBoxPath() else {
-            lastError = "sing-box not found. Checked common install paths and /usr/bin/which."
-            return
-        }
-        let proc = Process()
-        proc.executableURL = URL(fileURLWithPath: sudoPath)
-        proc.arguments = ["-n", singBoxPath, "run", "-c", configPath]
-        let outPipe = Pipe()
-        let errPipe = Pipe()
-        proc.standardOutput = outPipe
-        proc.standardError  = errPipe
-        tunOutputPipe = outPipe
-        tunErrorPipe = errPipe
-
-        let append: (FileHandle) -> Void = { [weak self] handle in
-            let data = handle.availableData
-            guard !data.isEmpty else {
-                handle.readabilityHandler = nil
-                return
-            }
-            guard let str = String(data: data, encoding: .utf8) else { return }
-            let clean = ProxyManager.stripANSI(str)
-            self?.appendTunLog(clean)
-        }
-        outPipe.fileHandleForReading.readabilityHandler = { append($0) }
-        errPipe.fileHandleForReading.readabilityHandler = { append($0) }
-
-        proc.terminationHandler = { [weak self] terminatedProcess in
-            DispatchQueue.main.async {
-                guard let self else { return }
-                guard self.tunProcess?.processIdentifier == terminatedProcess.processIdentifier else {
-                    return
-                }
-                if self.currentMode == .tun { self.currentMode = .direct }
-                self.cleanupTunProcess()
-            }
-        }
 
         do {
-            try proc.run()
-            tunProcess = proc
+            try updateSingBoxConfigLink(to: configPath)
+        } catch {
+            lastError = error.localizedDescription
+            return
+        }
+
+        _ = stopTun(force: true)
+        clearTunLog()
+        let result = runLaunchctl("start")
+        if result.succeeded {
             activeTunConfig = activeConfig
             currentMode = .tun
-        } catch {
-            lastError = "Failed to start tun: \(error.localizedDescription)"
+            lastError = nil
+            reloadTunLogFromFile()
+        } else {
+            activeTunConfig = nil
+            currentMode = .direct
+            lastError = "Failed to start sing-box service: \(result.failureMessage)"
         }
     }
 
     func clearTunLog() {
-        resetTunLog()
+        tunLogLines = []
+        tunLogByteCount = 0
+    }
+
+    func reloadTunLogFromFile(maxBytes: UInt64 = 1_048_576) {
+        guard FileManager.default.fileExists(atPath: singBoxLogPath) else {
+            tunLogLines = []
+            tunLogByteCount = 0
+            return
+        }
+
+        do {
+            let text = try Self.readLogFile(at: singBoxLogPath, maxBytes: maxBytes)
+            let clean = Self.stripANSI(text)
+            let split = Self.splitLines(clean)
+            let lines = split.remainder.isEmpty ? split.lines : split.lines + [split.remainder]
+            tunLogLines = lines
+            tunLogByteCount = lines.reduce(0) { $0 + $1.utf8.count }
+        } catch {
+            tunLogLines = ["Failed to read sing-box log: \(error.localizedDescription)"]
+            tunLogByteCount = 0
+        }
     }
 
     func addTunConfig(name: String, path: String) {
@@ -242,86 +296,49 @@ class ProxyManager: ObservableObject {
         }
     }
 
-    private func stopTun() {
-        if let proc = tunProcess {
-            let sudoPID = proc.processIdentifier
-            // sudo -n without a TTY does not forward signals to its child, so
-            // sing-box must be killed directly by finding its PID via pgrep.
-            let pgrep = Process()
-            pgrep.executableURL = URL(fileURLWithPath: "/usr/bin/pgrep")
-            pgrep.arguments = ["-P", "\(sudoPID)"]
-            let pipe = Pipe()
-            pgrep.standardOutput = pipe
-            if (try? pgrep.run()) != nil {
-                pgrep.waitUntilExit()
-                let data = pipe.fileHandleForReading.readDataToEndOfFile()
-                let output = String(data: data, encoding: .utf8) ?? ""
-                for childPID in Self.parseProcessIDs(output) {
-                    let kill = Process()
-                    kill.executableURL = URL(fileURLWithPath: sudoPath)
-                    kill.arguments = ["-n", "kill", "\(childPID)"]
-                    try? kill.run()
-                    kill.waitUntilExit()
-                }
-            }
-            proc.terminate()
+    private func updateSingBoxConfigLink(to configPath: String) throws {
+        let fileManager = FileManager.default
+        let linkPath = singBoxConfigLinkPath
+        let linkURL = URL(fileURLWithPath: linkPath)
+        let parentURL = linkURL.deletingLastPathComponent()
+        guard fileManager.fileExists(atPath: parentURL.path) else {
+            throw NSError(
+                domain: "proxy_ctrl.sing-box",
+                code: 1,
+                userInfo: [NSLocalizedDescriptionKey: "sing-box config link directory not found: \(parentURL.path)"]
+            )
         }
-        cleanupTunProcess()
+
+        let tempPath = linkPath + ".proxy_ctrl.\(UUID().uuidString).tmp"
+        defer { try? fileManager.removeItem(atPath: tempPath) }
+
+        try fileManager.createSymbolicLink(atPath: tempPath, withDestinationPath: configPath)
+
+        if (try? fileManager.destinationOfSymbolicLink(atPath: linkPath)) != nil {
+            try fileManager.removeItem(atPath: linkPath)
+        } else if fileManager.fileExists(atPath: linkPath) {
+            throw NSError(
+                domain: "proxy_ctrl.sing-box",
+                code: 2,
+                userInfo: [NSLocalizedDescriptionKey: "Refusing to replace non-symlink sing-box config: \(linkPath)"]
+            )
+        }
+
+        try fileManager.moveItem(atPath: tempPath, toPath: linkPath)
     }
 
-    private func cleanupTunProcess() {
-        tunOutputPipe?.fileHandleForReading.readabilityHandler = nil
-        tunErrorPipe?.fileHandleForReading.readabilityHandler = nil
-        tunOutputPipe = nil
-        tunErrorPipe = nil
-        tunProcess = nil
+    @discardableResult
+    private func stopTun(force: Bool = false) -> String? {
+        guard force || currentMode == .tun || activeTunConfig != nil else { return nil }
+
+        let result = runLaunchctl("stop")
         activeTunConfig = nil
-    }
-
-    private func resetTunLog() {
-        tunLogQueue.async { [weak self] in
-            guard let self else { return }
-            self.pendingChunks = []
-            self.incompleteLine = ""
-            self.isFlushScheduled = false
-            DispatchQueue.main.async { [weak self] in
-                self?.tunLogLines = []
-                self?.tunLogByteCount = 0
-            }
+        if currentMode == .tun {
+            currentMode = .direct
         }
-    }
 
-    func appendTunLog(_ text: String) {
-        tunLogQueue.async { [weak self] in
-            guard let self else { return }
-            self.pendingChunks.append(text)
-
-            guard !self.isFlushScheduled else { return }
-            self.isFlushScheduled = true
-            self.tunLogQueue.asyncAfter(deadline: .now() + 0.5) { [weak self] in
-                guard let self else { return }
-                self.isFlushScheduled = false
-                self.flushPendingLog()
-            }
-        }
-    }
-
-    private func flushPendingLog() {
-        let joined = pendingChunks.joined()
-        pendingChunks = []
-        let text = incompleteLine + joined
-        incompleteLine = ""
-        guard !text.isEmpty else { return }
-
-        let (newLines, remainder) = Self.splitLines(text)
-        incompleteLine = remainder
-
-        guard !newLines.isEmpty else { return }
-        let addedBytes = newLines.reduce(0) { $0 + $1.utf8.count }
-        DispatchQueue.main.async { [weak self] in
-            self?.tunLogLines.append(contentsOf: newLines)
-            self?.tunLogByteCount += addedBytes
-        }
+        guard !result.succeeded else { return nil }
+        return "Failed to stop sing-box service: \(result.failureMessage)"
     }
 
     // MARK: - State detection
@@ -346,37 +363,37 @@ class ProxyManager: ObservableObject {
 
     // MARK: - Execution helpers
 
-    /// Resolve sing-box by absolute path so sudo does not depend on PATH.
-    func resolveSingBoxPath() -> String? {
-        if let override = singBoxPathOverride {
-            let path = NSString(string: override).expandingTildeInPath
-            return FileManager.default.isExecutableFile(atPath: path) ? path : nil
-        }
-        let candidates = [
-            "/opt/homebrew/bin/sing-box",
-            "/usr/local/bin/sing-box",
-            "/usr/bin/sing-box",
-        ]
-        for path in candidates where FileManager.default.isExecutableFile(atPath: path) {
-            return path
-        }
-
-        let found = readCommand(at: "/usr/bin/which", args: ["sing-box"])
-            .trimmingCharacters(in: .whitespacesAndNewlines)
-        if !found.isEmpty, FileManager.default.isExecutableFile(atPath: found) {
-            return found
-        }
-        return nil
+    private func runLaunchctl(_ action: String) -> CommandResult {
+        runPrivilegedCommand([launchctlPath, action, singBoxServiceLabel])
     }
 
-    nonisolated static func parseProcessIDs(_ output: String) -> [Int32] {
-        output
-            .split(whereSeparator: \.isNewline)
-            .compactMap { Int32($0.trimmingCharacters(in: .whitespacesAndNewlines)) }
-    }
+    private func runPrivilegedCommand(_ arguments: [String]) -> CommandResult {
+        if let handler = privilegedCommandHandler {
+            return handler(arguments)
+        }
 
-    private var sudoPath: String {
-        sudoPathOverride ?? "/usr/bin/sudo"
+        let proc = Process()
+        proc.executableURL = URL(fileURLWithPath: sudoPath)
+        proc.arguments = ["-n"] + arguments
+        let outPipe = Pipe()
+        let errPipe = Pipe()
+        proc.standardOutput = outPipe
+        proc.standardError = errPipe
+
+        do {
+            try proc.run()
+            proc.waitUntilExit()
+        } catch {
+            return CommandResult(
+                exitCode: 127,
+                output: "",
+                errorOutput: "exec failed: \(error.localizedDescription)"
+            )
+        }
+
+        let output = String(data: outPipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
+        let errorOutput = String(data: errPipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
+        return CommandResult(exitCode: proc.terminationStatus, output: output, errorOutput: errorOutput)
     }
 
     /// Run multiple networksetup commands directly.

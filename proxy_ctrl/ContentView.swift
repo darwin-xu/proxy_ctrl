@@ -50,6 +50,9 @@ struct LogView: View {
                     .font(.caption)
                     .foregroundColor(.secondary)
                 Spacer()
+                Button("Reload") {
+                    proxy.reloadTunLogFromFile()
+                }
                 Button("Copy All") {
                     NSPasteboard.general.clearContents()
                     NSPasteboard.general.setString(

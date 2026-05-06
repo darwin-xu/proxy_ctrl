@@ -24,14 +24,6 @@
         "identifier" : "D6CCD5042F88A4C500BE3A14",
         "name" : "proxy_ctrlTests"
       }
-    },
-    {
-      "parallelizable" : true,
-      "target" : {
-        "containerPath" : "container:proxy_ctrl.xcodeproj",
-        "identifier" : "D6CCD50E2F88A4C500BE3A14",
-        "name" : "proxy_ctrlUITests"
-      }
     }
   ],
   "version" : 1

@@ -46,17 +46,6 @@
                ReferencedContainer = "container:proxy_ctrl.xcodeproj">
             </BuildableReference>
          </TestableReference>
-         <TestableReference
-            skipped = "NO"
-            parallelizable = "YES">
-            <BuildableReference
-               BuildableIdentifier = "primary"
-               BlueprintIdentifier = "D6CCD50E2F88A4C500BE3A14"
-               BuildableName = "proxy_ctrlUITests.xctest"
-               BlueprintName = "proxy_ctrlUITests"
-               ReferencedContainer = "container:proxy_ctrl.xcodeproj">
-            </BuildableReference>
-         </TestableReference>
       </Testables>
    </TestAction>
    <LaunchAction

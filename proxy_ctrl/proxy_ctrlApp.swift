@@ -1069,7 +1069,7 @@ final class LogWindowController: NSWindowController, NSWindowDelegate {
             backing: .buffered,
             defer: false
         )
-        win.title = "Tun Log"
+        win.title = "sing-box Log"
         win.contentViewController = hosting
         win.setContentSize(NSSize(width: 640, height: 420))
         win.center()
@@ -1082,6 +1082,7 @@ final class LogWindowController: NSWindowController, NSWindowDelegate {
     required init?(coder: NSCoder) { fatalError() }
 
     func showLog() {
+        ProxyManager.shared.reloadTunLogFromFile()
         NSApp.setActivationPolicy(.regular)
         DispatchQueue.main.async { [weak self] in
             guard let self else { return }

@@ -16,7 +16,9 @@ private func makeProxyManagerForTesting(
     httpPort: String = "18080",
     socksHost: String = "203.0.113.20",
     socksPort: String = "19090",
-    tunConfigPath: String? = ""
+    tunConfigPath: String? = "",
+    singBoxConfigLinkPath: String? = nil,
+    singBoxLogPath: String? = nil
 ) -> ProxyManager {
     let manager = ProxyManager(forTesting: true)
     manager.networkServiceOverride = networkService
@@ -25,6 +27,8 @@ private func makeProxyManagerForTesting(
     manager.socksHostOverride = socksHost
     manager.socksPortOverride = socksPort
     manager.tunConfigPathOverride = tunConfigPath
+    manager.singBoxConfigLinkPathOverride = singBoxConfigLinkPath
+    manager.singBoxLogPathOverride = singBoxLogPath
     return manager
 }
 
@@ -50,18 +54,15 @@ private func makeAwakeDefaults() -> (String, UserDefaults) {
     return (suiteName, defaults)
 }
 
-private func makeExecutableScript(in directory: URL, name: String, body: String) throws -> URL {
-    let url = directory.appendingPathComponent(name)
-    try body.write(to: url, atomically: true, encoding: .utf8)
-    try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: url.path)
-    return url
-}
-
 private func makeTemporaryDirectory() throws -> URL {
     let url = FileManager.default.temporaryDirectory
         .appendingPathComponent("proxy_ctrl_tests_\(UUID().uuidString)", isDirectory: true)
     try FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
     return url
+}
+
+private func successfulCommandResult() -> CommandResult {
+    CommandResult(exitCode: 0, output: "", errorOutput: "")
 }
 
 // MARK: - ProxyMode
@@ -357,112 +358,47 @@ struct LineSplittingTests {
     }
 }
 
-// MARK: - Log Pipeline Integration
+// MARK: - sing-box log file
 
 @MainActor
-struct LogPipelineTests {
-    @Test func appendSimpleLines() async throws {
-        let manager = ProxyManager(forTesting: true)
-        manager.appendTunLog("line1\nline2\n")
-        try await Task.sleep(for: .milliseconds(800))
-        await MainActor.run {
-            #expect(manager.tunLogLines == ["line1", "line2"])
-        }
+struct SingBoxLogFileTests {
+    @Test func reloadReadsSingBoxLogFile() throws {
+        let directory = try makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let logURL = directory.appendingPathComponent("sing-box.log")
+        try "\u{1B}[36mINFO\u{1B}[0m started\nlast line".write(
+            to: logURL,
+            atomically: true,
+            encoding: .utf8
+        )
+
+        let manager = makeProxyManagerForTesting(singBoxLogPath: logURL.path)
+        manager.reloadTunLogFromFile()
+
+        #expect(manager.tunLogLines == ["INFO started", "last line"])
+        #expect(manager.tunLogByteCount == "INFO startedlast line".utf8.count)
     }
 
-    @Test func byteCountAccumulates() async throws {
-        let manager = ProxyManager(forTesting: true)
-        manager.appendTunLog("abc\n")     // 3 bytes
-        try await Task.sleep(for: .milliseconds(800))
-        manager.appendTunLog("defgh\n")   // 5 bytes
-        try await Task.sleep(for: .milliseconds(800))
-        await MainActor.run {
-            #expect(manager.tunLogByteCount == 8)
-        }
+    @Test func reloadMissingSingBoxLogFileClearsDisplayedLog() {
+        let manager = makeProxyManagerForTesting(singBoxLogPath: "/nonexistent/sing-box.log")
+        manager.tunLogLines = ["old"]
+        manager.tunLogByteCount = 3
+
+        manager.reloadTunLogFromFile()
+
+        #expect(manager.tunLogLines.isEmpty)
+        #expect(manager.tunLogByteCount == 0)
     }
 
-    @Test func incompleteLineHeldAcrossFlushes() async throws {
+    @Test func clearResetsDisplayedLog() {
         let manager = ProxyManager(forTesting: true)
-        manager.appendTunLog("partial")
-        try await Task.sleep(for: .milliseconds(800))
-        await MainActor.run {
-            #expect(manager.tunLogLines.isEmpty)
-        }
+        manager.tunLogLines = ["line"]
+        manager.tunLogByteCount = 4
 
-        manager.appendTunLog(" rest\n")
-        try await Task.sleep(for: .milliseconds(800))
-        await MainActor.run {
-            #expect(manager.tunLogLines == ["partial rest"])
-        }
-    }
-
-    @Test func multipleRapidAppendsCoalesced() async throws {
-        let manager = ProxyManager(forTesting: true)
-        // All appended within the 0.5s flush window
-        manager.appendTunLog("a\n")
-        manager.appendTunLog("b\n")
-        manager.appendTunLog("c\n")
-        try await Task.sleep(for: .milliseconds(800))
-        await MainActor.run {
-            #expect(manager.tunLogLines == ["a", "b", "c"])
-            #expect(manager.tunLogByteCount == 3)
-        }
-    }
-
-    @Test func clearResetsEverything() async throws {
-        let manager = ProxyManager(forTesting: true)
-        manager.appendTunLog("line1\nline2\n")
-        try await Task.sleep(for: .milliseconds(800))
         manager.clearTunLog()
-        try await Task.sleep(for: .milliseconds(300))
-        await MainActor.run {
-            #expect(manager.tunLogLines.isEmpty)
-            #expect(manager.tunLogByteCount == 0)
-        }
-    }
 
-    @Test func clearThenAppendWorks() async throws {
-        let manager = ProxyManager(forTesting: true)
-        manager.appendTunLog("old\n")
-        try await Task.sleep(for: .milliseconds(800))
-        manager.clearTunLog()
-        try await Task.sleep(for: .milliseconds(300))
-        manager.appendTunLog("new\n")
-        try await Task.sleep(for: .milliseconds(800))
-        await MainActor.run {
-            #expect(manager.tunLogLines == ["new"])
-            #expect(manager.tunLogByteCount == 3)
-        }
-    }
-
-    @Test func emptyAppendProducesNoLines() async throws {
-        let manager = ProxyManager(forTesting: true)
-        manager.appendTunLog("")
-        try await Task.sleep(for: .milliseconds(800))
-        await MainActor.run {
-            #expect(manager.tunLogLines.isEmpty)
-            #expect(manager.tunLogByteCount == 0)
-        }
-    }
-
-    @Test func ansiStrippedBeforeAppend() async throws {
-        let manager = ProxyManager(forTesting: true)
-        let raw = "\u{1B}[37mTRACE\u{1B}[0m hello world\n"
-        let cleaned = ProxyManager.stripANSI(raw)
-        manager.appendTunLog(cleaned)
-        try await Task.sleep(for: .milliseconds(800))
-        await MainActor.run {
-            #expect(manager.tunLogLines == ["TRACE hello world"])
-        }
-    }
-
-    @Test func unicodeByteCounting() async throws {
-        let manager = ProxyManager(forTesting: true)
-        manager.appendTunLog("日本\n")  // 6 UTF-8 bytes
-        try await Task.sleep(for: .milliseconds(800))
-        await MainActor.run {
-            #expect(manager.tunLogByteCount == 6)
-        }
+        #expect(manager.tunLogLines.isEmpty)
+        #expect(manager.tunLogByteCount == 0)
     }
 }
 
@@ -508,6 +444,123 @@ struct ApplyTunValidationTests {
     }
 }
 
+// MARK: - applyTun via launchctl service
+
+@MainActor
+struct ApplyTunServiceTests {
+    @Test func applyTunLinksConfigAndStartsService() throws {
+        let directory = try makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let configDirectory = directory.appendingPathComponent("sing-box", isDirectory: true)
+        try FileManager.default.createDirectory(at: configDirectory, withIntermediateDirectories: true)
+        let linkURL = configDirectory.appendingPathComponent("config.json")
+        let configURL = directory.appendingPathComponent("selected.json")
+        try "{}".write(to: configURL, atomically: true, encoding: .utf8)
+
+        var commands: [[String]] = []
+        let manager = makeProxyManagerForTesting(singBoxConfigLinkPath: linkURL.path)
+        manager.privilegedCommandHandler = { arguments in
+            commands.append(arguments)
+            return successfulCommandResult()
+        }
+        let config = TunConfig(name: "selected", path: configURL.path)
+
+        manager.applyTun(config: config)
+
+        #expect(commands == [
+            ["/bin/launchctl", "stop", "io.sing-box"],
+            ["/bin/launchctl", "start", "io.sing-box"],
+        ])
+        #expect(try FileManager.default.destinationOfSymbolicLink(atPath: linkURL.path) == configURL.path)
+        #expect(manager.currentMode == .tun)
+        #expect(manager.activeTunConfig?.id == config.id)
+        #expect(manager.lastError == nil)
+    }
+
+    @Test func switchingTunConfigsRelinksAndRestartsService() throws {
+        let directory = try makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let serviceDirectory = directory.appendingPathComponent("sing-box", isDirectory: true)
+        try FileManager.default.createDirectory(at: serviceDirectory, withIntermediateDirectories: true)
+        let linkURL = serviceDirectory.appendingPathComponent("config.json")
+        let firstConfigURL = directory.appendingPathComponent("first.json")
+        let secondConfigURL = directory.appendingPathComponent("second.json")
+        try "{}".write(to: firstConfigURL, atomically: true, encoding: .utf8)
+        try "{}".write(to: secondConfigURL, atomically: true, encoding: .utf8)
+
+        var commands: [[String]] = []
+        let manager = makeProxyManagerForTesting(singBoxConfigLinkPath: linkURL.path)
+        manager.privilegedCommandHandler = { arguments in
+            commands.append(arguments)
+            return successfulCommandResult()
+        }
+        let firstConfig = TunConfig(name: "first", path: firstConfigURL.path)
+        let secondConfig = TunConfig(name: "second", path: secondConfigURL.path)
+
+        manager.applyTun(config: firstConfig)
+        manager.applyTun(config: secondConfig)
+
+        #expect(commands == [
+            ["/bin/launchctl", "stop", "io.sing-box"],
+            ["/bin/launchctl", "start", "io.sing-box"],
+            ["/bin/launchctl", "stop", "io.sing-box"],
+            ["/bin/launchctl", "start", "io.sing-box"],
+        ])
+        #expect(try FileManager.default.destinationOfSymbolicLink(atPath: linkURL.path) == secondConfigURL.path)
+        #expect(manager.currentMode == .tun)
+        #expect(manager.activeTunConfig?.id == secondConfig.id)
+    }
+
+    @Test func startFailureDoesNotEnterTunMode() throws {
+        let directory = try makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let serviceDirectory = directory.appendingPathComponent("sing-box", isDirectory: true)
+        try FileManager.default.createDirectory(at: serviceDirectory, withIntermediateDirectories: true)
+        let linkURL = serviceDirectory.appendingPathComponent("config.json")
+        let configURL = directory.appendingPathComponent("selected.json")
+        try "{}".write(to: configURL, atomically: true, encoding: .utf8)
+
+        let manager = makeProxyManagerForTesting(singBoxConfigLinkPath: linkURL.path)
+        manager.privilegedCommandHandler = { arguments in
+            if arguments.contains("start") {
+                return CommandResult(exitCode: 1, output: "", errorOutput: "launch failed")
+            }
+            return successfulCommandResult()
+        }
+
+        manager.applyTun(config: TunConfig(name: "selected", path: configURL.path))
+
+        #expect(manager.currentMode == .direct)
+        #expect(manager.activeTunConfig == nil)
+        #expect(manager.lastError == "Failed to start sing-box service: launch failed")
+    }
+
+    @Test func nonSymlinkConfigPathIsNotReplaced() throws {
+        let directory = try makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let serviceDirectory = directory.appendingPathComponent("sing-box", isDirectory: true)
+        try FileManager.default.createDirectory(at: serviceDirectory, withIntermediateDirectories: true)
+        let linkURL = serviceDirectory.appendingPathComponent("config.json")
+        let configURL = directory.appendingPathComponent("selected.json")
+        try "existing".write(to: linkURL, atomically: true, encoding: .utf8)
+        try "{}".write(to: configURL, atomically: true, encoding: .utf8)
+
+        var commands: [[String]] = []
+        let manager = makeProxyManagerForTesting(singBoxConfigLinkPath: linkURL.path)
+        manager.privilegedCommandHandler = { arguments in
+            commands.append(arguments)
+            return successfulCommandResult()
+        }
+
+        manager.applyTun(config: TunConfig(name: "selected", path: configURL.path))
+
+        #expect(commands.isEmpty)
+        #expect(manager.currentMode == .direct)
+        #expect(manager.lastError?.contains("Refusing to replace non-symlink sing-box config") == true)
+        #expect((try String(contentsOf: linkURL, encoding: .utf8)) == "existing")
+    }
+}
+
 // MARK: - Initial State
 
 @MainActor
@@ -525,7 +578,7 @@ struct InitialStateTests {
 
 struct CombinedProcessingTests {
     @Test func fullPipelineSimulation() {
-        // Simulate what the pipe handler does: strip ANSI then split
+        // Simulate the log-file display path: strip ANSI then split.
         let raw = "\u{1B}[37mTRACE\u{1B}[0m[0000] init\n\u{1B}[36mINFO\u{1B}[0m[0000] ready\n"
         let cleaned = ProxyManager.stripANSI(raw)
         let (lines, remainder) = ProxyManager.splitLines(cleaned)
@@ -567,28 +620,6 @@ struct CombinedProcessingTests {
     }
 }
 
-// MARK: - resolveSingBoxPath
-
-@MainActor
-struct ResolveSingBoxPathTests {
-    @Test func findsInstalledSingBox() {
-        let manager = ProxyManager(forTesting: true)
-        let path = manager.resolveSingBoxPath()
-        // sing-box is installed on this machine
-        if let path {
-            #expect(FileManager.default.isExecutableFile(atPath: path))
-            #expect(path.hasSuffix("sing-box"))
-        }
-    }
-
-    @Test func returnsAbsolutePath() {
-        let manager = ProxyManager(forTesting: true)
-        if let path = manager.resolveSingBoxPath() {
-            #expect(path.hasPrefix("/"))
-        }
-    }
-}
-
 // MARK: - readCommand
 
 @MainActor
@@ -609,40 +640,6 @@ struct ReadCommandTests {
         let manager = ProxyManager(forTesting: true)
         let output = manager.readCommand(at: "/bin/echo", args: ["-n", "test"])
         #expect(output == "test")
-    }
-}
-
-// MARK: - process id parsing
-
-struct ProcessIDParsingTests {
-    @Test func parsesMultiplePIDsFromPgrepOutput() {
-        #expect(ProxyManager.parseProcessIDs("123\n456\n") == [123, 456])
-    }
-
-    @Test func ignoresInvalidPIDLines() {
-        #expect(ProxyManager.parseProcessIDs("123\nnot-a-pid\n 789 \n") == [123, 789])
-    }
-}
-
-// MARK: - applyTun with valid config but no sudo
-
-@MainActor
-struct ApplyTunProcessTests {
-    @Test func validConfigNoSudoSetsError() throws {
-        // Create a temporary config file
-        let tmp = FileManager.default.temporaryDirectory
-            .appendingPathComponent("proxy_ctrl_test_\(UUID().uuidString).json")
-        try "{}".write(to: tmp, atomically: true, encoding: .utf8)
-        defer { try? FileManager.default.removeItem(at: tmp) }
-
-        let manager = makeProxyManagerForTesting(tunConfigPath: tmp.path)
-        manager.applyTun()
-
-        // Either succeeds (sets tun mode) or fails (sets lastError)
-        // On machines without passwordless sudo, the process will start
-        // but sing-box/sudo may fail quickly
-        let didAttempt = manager.currentMode == .tun || manager.lastError != nil
-        #expect(didAttempt)
     }
 }
 
@@ -822,74 +819,43 @@ struct TunConfigPathTests {
 struct StopTunViaApplyTests {
     @Test func applyHTTPStopsPreviousTun() {
         let manager = makeProxyManagerForTesting()
+        var serviceCommands: [[String]] = []
         manager.currentMode = .tun
+        manager.privilegedCommandHandler = { arguments in
+            serviceCommands.append(arguments)
+            return successfulCommandResult()
+        }
         manager.runWithAuthHandler = { _, completion in completion() }
         manager.applyHTTP()
+        #expect(serviceCommands == [["/bin/launchctl", "stop", "io.sing-box"]])
         #expect(manager.currentMode == .http)
     }
 
     @Test func applySOCKSStopsPreviousTun() {
         let manager = makeProxyManagerForTesting()
+        var serviceCommands: [[String]] = []
         manager.currentMode = .tun
+        manager.privilegedCommandHandler = { arguments in
+            serviceCommands.append(arguments)
+            return successfulCommandResult()
+        }
         manager.runWithAuthHandler = { _, completion in completion() }
         manager.applySOCKS()
+        #expect(serviceCommands == [["/bin/launchctl", "stop", "io.sing-box"]])
         #expect(manager.currentMode == .socks)
     }
 
     @Test func applyDirectStopsPreviousTun() {
         let manager = makeProxyManagerForTesting()
+        var serviceCommands: [[String]] = []
         manager.currentMode = .tun
+        manager.privilegedCommandHandler = { arguments in
+            serviceCommands.append(arguments)
+            return successfulCommandResult()
+        }
         manager.runWithAuthHandler = { _, completion in completion() }
         manager.applyDirect()
+        #expect(serviceCommands == [["/bin/launchctl", "stop", "io.sing-box"]])
         #expect(manager.currentMode == .direct)
-    }
-
-    @Test func switchingTunConfigsKeepsNewTunTracked() async throws {
-        let directory = try makeTemporaryDirectory()
-        defer { try? FileManager.default.removeItem(at: directory) }
-
-        let fakeSudo = try makeExecutableScript(
-            in: directory,
-            name: "sudo",
-            body: """
-            #!/bin/sh
-            if [ "$1" = "-n" ]; then
-              shift
-            fi
-            exec "$@"
-            """
-        )
-        let fakeSingBox = try makeExecutableScript(
-            in: directory,
-            name: "sing-box",
-            body: """
-            #!/bin/sh
-            exec /bin/sleep 60
-            """
-        )
-        let firstConfigURL = directory.appendingPathComponent("first.json")
-        let secondConfigURL = directory.appendingPathComponent("second.json")
-        try "{}".write(to: firstConfigURL, atomically: true, encoding: .utf8)
-        try "{}".write(to: secondConfigURL, atomically: true, encoding: .utf8)
-
-        let manager = ProxyManager(forTesting: true)
-        manager.sudoPathOverride = fakeSudo.path
-        manager.singBoxPathOverride = fakeSingBox.path
-        let firstConfig = TunConfig(name: "first", path: firstConfigURL.path)
-        let secondConfig = TunConfig(name: "second", path: secondConfigURL.path)
-        defer {
-            manager.runWithAuthHandler = { _, completion in completion() }
-            manager.applyDirect()
-        }
-
-        manager.applyTun(config: firstConfig)
-        #expect(manager.currentMode == .tun)
-        #expect(manager.activeTunConfig?.id == firstConfig.id)
-
-        manager.applyTun(config: secondConfig)
-        try await Task.sleep(for: .milliseconds(300))
-
-        #expect(manager.currentMode == .tun)
-        #expect(manager.activeTunConfig?.id == secondConfig.id)
     }
 }
