@@ -7,6 +7,7 @@
 
 import Testing
 import Foundation
+import Combine
 @testable import proxy_ctrl
 
 @MainActor
@@ -388,6 +389,27 @@ struct SingBoxLogFileTests {
 
         #expect(manager.tunLogLines.isEmpty)
         #expect(manager.tunLogByteCount == 0)
+    }
+
+    @Test func reloadUnchangedSingBoxLogDoesNotRepublish() throws {
+        let directory = try makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let logURL = directory.appendingPathComponent("sing-box.log")
+        try "started\n".write(to: logURL, atomically: true, encoding: .utf8)
+
+        let manager = makeProxyManagerForTesting(singBoxLogPath: logURL.path)
+        var publishCount = 0
+        let cancellable = manager.objectWillChange.sink {
+            publishCount += 1
+        }
+        defer { cancellable.cancel() }
+
+        manager.reloadTunLogFromFile()
+        let publishCountAfterInitialLoad = publishCount
+        manager.reloadTunLogFromFile()
+
+        #expect(publishCountAfterInitialLoad > 0)
+        #expect(publishCount == publishCountAfterInitialLoad)
     }
 
     @Test func clearResetsDisplayedLog() {

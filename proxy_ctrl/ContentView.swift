@@ -15,7 +15,6 @@ import UniformTypeIdentifiers
 struct LogView: View {
     @EnvironmentObject var proxy: ProxyManager
     @AppStorage("logFollowLatest") private var followLatest = true
-    private let refreshTimer = Timer.publish(every: 1.0, on: .main, in: .common).autoconnect()
 
     var body: some View {
         VStack(spacing: 0) {
@@ -54,9 +53,6 @@ struct LogView: View {
             }
         }
         .frame(width: 640, height: 420)
-        .onReceive(refreshTimer) { _ in
-            proxy.reloadTunLogFromFile()
-        }
     }
 }
 

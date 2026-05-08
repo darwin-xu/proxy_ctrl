@@ -35,11 +35,9 @@ struct proxy_ctrlApp: App {
 }
 
 class AppDelegate: NSObject, NSApplicationDelegate {
-    private var stderrPipe: Pipe?
     private var statusMenuController: ProxyStatusMenuController?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
-        installStderrFilter()
         statusMenuController = ProxyStatusMenuController(proxy: .shared, awakeController: .shared)
         statusMenuController?.install()
         NSApp.setActivationPolicy(.accessory)
@@ -47,34 +45,6 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 
     func applicationWillTerminate(_ notification: Notification) {
         AwakeController.shared.releaseForTermination()
-    }
-
-    /// Redirect stderr through a pipe and drop lines containing known
-    /// benign Apple-framework warnings that cannot be avoided at the API level.
-    private func installStderrFilter() {
-        let original = dup(STDERR_FILENO)
-        guard original >= 0 else { return }
-
-        let pipe = Pipe()
-        self.stderrPipe = pipe          // prevent deallocation
-        dup2(pipe.fileHandleForWriting.fileDescriptor, STDERR_FILENO)
-
-        pipe.fileHandleForReading.readabilityHandler = { handle in
-            let data = handle.availableData
-            guard !data.isEmpty else { return }
-
-            if let str = String(data: data, encoding: .utf8),
-               str.contains("task name port right") ||
-               str.contains("ViewBridge to RemoteViewService") {
-                return   // suppress
-            }
-
-            data.withUnsafeBytes { buf in
-                if let base = buf.baseAddress {
-                    write(original, base, data.count)
-                }
-            }
-        }
     }
 }
 
@@ -92,23 +62,22 @@ final class ProxyStatusMenuController: NSObject {
     }
 
     func install() {
-        updateStatusButton()
-        rebuildMenu()
-        proxy.objectWillChange
+        Publishers.CombineLatest4(
+            proxy.$currentMode.removeDuplicates(),
+            proxy.$lastError.removeDuplicates(),
+            proxy.$tunConfigs.removeDuplicates(),
+            proxy.$activeTunConfig.removeDuplicates()
+        )
             .receive(on: RunLoop.main)
             .sink { [weak self] _ in
-                DispatchQueue.main.async {
-                    self?.updateStatusButton()
-                    self?.rebuildMenu()
-                }
+                self?.updateStatusButton()
+                self?.rebuildMenu()
             }
             .store(in: &cancellables)
         awakeController.objectWillChange
             .receive(on: RunLoop.main)
             .sink { [weak self] _ in
-                DispatchQueue.main.async {
-                    self?.rebuildMenu()
-                }
+                self?.rebuildMenu()
             }
             .store(in: &cancellables)
         proxy.refreshCurrentMode()
@@ -1175,6 +1144,7 @@ final class SettingsPanel: NSPanel {
 final class LogWindowController: NSWindowController, NSWindowDelegate {
     static let shared = LogWindowController()
     private static let positionKey = "logWindowOrigin"
+    private var refreshTimer: Timer?
 
     private init() {
         let hosting = NSHostingController(
@@ -1200,10 +1170,10 @@ final class LogWindowController: NSWindowController, NSWindowDelegate {
     required init?(coder: NSCoder) { fatalError() }
 
     func showLog() {
-        ProxyManager.shared.reloadTunLogFromFile()
         NSApp.setActivationPolicy(.regular)
         DispatchQueue.main.async { [weak self] in
             guard let self else { return }
+            ProxyManager.shared.reloadTunLogFromFile()
             if let window {
                 AuxiliaryWindowPositionStore.restoreOrigin(for: window, key: Self.positionKey)
             }
@@ -1211,6 +1181,7 @@ final class LogWindowController: NSWindowController, NSWindowDelegate {
             if let window {
                 AuxiliaryWindowCoordinator.present(window)
             }
+            startRefreshingLog()
         }
     }
 
@@ -1221,7 +1192,27 @@ final class LogWindowController: NSWindowController, NSWindowDelegate {
 
     func windowWillClose(_ notification: Notification) {
         guard let window else { return }
+        stopRefreshingLog()
         AuxiliaryWindowPositionStore.saveOrigin(of: window, key: Self.positionKey)
         AuxiliaryWindowCoordinator.auxiliaryWindowWillClose(window)
+    }
+
+    private func startRefreshingLog() {
+        guard refreshTimer == nil else { return }
+        let timer = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { [weak self] _ in
+            guard let self else { return }
+            guard window?.isVisible == true else {
+                stopRefreshingLog()
+                return
+            }
+            ProxyManager.shared.reloadTunLogFromFile()
+        }
+        timer.tolerance = 0.25
+        refreshTimer = timer
+    }
+
+    private func stopRefreshingLog() {
+        refreshTimer?.invalidate()
+        refreshTimer = nil
     }
 }

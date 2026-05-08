@@ -10,7 +10,7 @@ enum ProxyMode: String {
     case http, socks, tun, direct
 }
 
-struct TunConfig: Identifiable, Codable {
+struct TunConfig: Identifiable, Codable, Equatable {
     var id: UUID
     var name: String
     var path: String
@@ -68,6 +68,7 @@ class ProxyManager: ObservableObject {
     var runWithAuthHandler: ((_ commands: [[String]], _ completion: @escaping () -> Void) -> Void)?
     var privilegedCommandHandler: ((_ arguments: [String]) -> CommandResult)?
     var readCommandHandler: ((_ executablePath: String, _ args: [String]) -> String)?
+    private var tunLogSignature: LogFileSignature?
 
     // MARK: - Pure helpers (testable)
 
@@ -114,6 +115,13 @@ class ProxyManager: ObservableObject {
             expanded = URL(fileURLWithPath: basePath).appendingPathComponent(expanded).path
         }
         return URL(fileURLWithPath: expanded).standardizedFileURL.path
+    }
+
+    private struct LogFileSignature: Equatable {
+        let path: String
+        let maxBytes: UInt64
+        let size: UInt64
+        let modificationDate: Date?
     }
 
     private var networkService: String {
@@ -266,7 +274,6 @@ class ProxyManager: ObservableObject {
             activeTunConfig = activeConfig
             currentMode = .tun
             lastError = nil
-            reloadTunLogFromFile()
         } else {
             activeTunConfig = nil
             currentMode = .direct
@@ -275,27 +282,48 @@ class ProxyManager: ObservableObject {
     }
 
     func clearTunLog() {
-        tunLogLines = []
-        tunLogByteCount = 0
+        tunLogSignature = nil
+        setTunLog(lines: [], byteCount: 0)
     }
 
     func reloadTunLogFromFile(maxBytes: UInt64 = 1_048_576) {
-        guard FileManager.default.fileExists(atPath: singBoxLogPath) else {
-            tunLogLines = []
-            tunLogByteCount = 0
+        let path = singBoxLogPath
+        guard
+            FileManager.default.fileExists(atPath: path),
+            let attributes = try? FileManager.default.attributesOfItem(atPath: path)
+        else {
+            tunLogSignature = nil
+            setTunLog(lines: [], byteCount: 0)
             return
         }
 
+        let signature = LogFileSignature(
+            path: path,
+            maxBytes: maxBytes,
+            size: (attributes[.size] as? NSNumber)?.uint64Value ?? 0,
+            modificationDate: attributes[.modificationDate] as? Date
+        )
+        guard signature != tunLogSignature else { return }
+
         do {
-            let text = try Self.readLogFile(at: singBoxLogPath, maxBytes: maxBytes)
+            let text = try Self.readLogFile(at: path, maxBytes: maxBytes)
             let clean = Self.stripANSI(text)
             let split = Self.splitLines(clean)
             let lines = split.remainder.isEmpty ? split.lines : split.lines + [split.remainder]
-            tunLogLines = lines
-            tunLogByteCount = lines.reduce(0) { $0 + $1.utf8.count }
+            tunLogSignature = signature
+            setTunLog(lines: lines, byteCount: lines.reduce(0) { $0 + $1.utf8.count })
         } catch {
-            tunLogLines = ["Failed to read sing-box log: \(error.localizedDescription)"]
-            tunLogByteCount = 0
+            tunLogSignature = nil
+            setTunLog(lines: ["Failed to read sing-box log: \(error.localizedDescription)"], byteCount: 0)
+        }
+    }
+
+    private func setTunLog(lines: [String], byteCount: Int) {
+        if tunLogLines != lines {
+            tunLogLines = lines
+        }
+        if tunLogByteCount != byteCount {
+            tunLogByteCount = byteCount
         }
     }
 
