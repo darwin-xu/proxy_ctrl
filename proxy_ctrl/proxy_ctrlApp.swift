@@ -9,6 +9,12 @@ import AppKit
 import Combine
 import SwiftUI
 
+extension Notification.Name {
+    static let settingsWindowDidOpen = Notification.Name("proxy_ctrl.settingsWindowDidOpen")
+    static let settingsWindowWillCancel = Notification.Name("proxy_ctrl.settingsWindowWillCancel")
+    static let settingsWindowWillClose = Notification.Name("proxy_ctrl.settingsWindowWillClose")
+}
+
 @main
 struct proxy_ctrlApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) var appDelegate
@@ -105,6 +111,7 @@ final class ProxyStatusMenuController: NSObject {
                 }
             }
             .store(in: &cancellables)
+        proxy.refreshCurrentMode()
     }
 
     private func updateStatusButton() {
@@ -987,8 +994,96 @@ private extension NSMenuItem {
 // SwiftUI's Window scene cannot be shown from an .accessory-policy app.
 // Use NSWindowController + temporary .regular policy instead.
 
+private enum AuxiliaryWindowCoordinator {
+    private static weak var settingsWindow: NSWindow?
+    private static weak var logWindow: NSWindow?
+
+    static func registerSettingsWindow(_ window: NSWindow) {
+        settingsWindow = window
+    }
+
+    static func registerLogWindow(_ window: NSWindow) {
+        logWindow = window
+    }
+
+    static func present(_ window: NSWindow) {
+        NSApp.setActivationPolicy(.regular)
+        NSApp.activate(ignoringOtherApps: true)
+        window.makeKeyAndOrderFront(nil)
+        window.orderFrontRegardless()
+    }
+
+    static func auxiliaryWindowWillClose(_ closingWindow: NSWindow) {
+        DispatchQueue.main.async {
+            let remainingWindows = visibleAuxiliaryWindows(excluding: closingWindow)
+            guard let windowToRestore = remainingWindows.last else {
+                NSApp.setActivationPolicy(.accessory)
+                return
+            }
+
+            NSApp.setActivationPolicy(.regular)
+            NSApp.activate(ignoringOtherApps: true)
+            windowToRestore.makeKeyAndOrderFront(nil)
+            windowToRestore.orderFrontRegardless()
+        }
+    }
+
+    private static func visibleAuxiliaryWindows(excluding closingWindow: NSWindow) -> [NSWindow] {
+        [settingsWindow, logWindow]
+            .compactMap { $0 }
+            .filter { $0 !== closingWindow && $0.isVisible }
+    }
+}
+
+private enum AuxiliaryWindowPositionStore {
+    static func restoreOrigin(for window: NSWindow, key: String) {
+        guard let origin = savedOrigin(for: key) else {
+            window.center()
+            return
+        }
+
+        window.setFrameOrigin(constrainedOrigin(origin, for: window.frame.size))
+    }
+
+    static func saveOrigin(of window: NSWindow, key: String) {
+        let origin = window.frame.origin
+        UserDefaults.standard.set(
+            ["x": Double(origin.x), "y": Double(origin.y)],
+            forKey: key
+        )
+    }
+
+    private static func savedOrigin(for key: String) -> NSPoint? {
+        guard
+            let dictionary = UserDefaults.standard.dictionary(forKey: key),
+            let x = dictionary["x"] as? Double,
+            let y = dictionary["y"] as? Double
+        else { return nil }
+        return NSPoint(x: x, y: y)
+    }
+
+    private static func constrainedOrigin(_ origin: NSPoint, for size: NSSize) -> NSPoint {
+        let candidateFrame = NSRect(origin: origin, size: size)
+        if NSScreen.screens.contains(where: { $0.visibleFrame.intersects(candidateFrame) }) {
+            return origin
+        }
+
+        guard let visibleFrame = NSScreen.main?.visibleFrame ?? NSScreen.screens.first?.visibleFrame else {
+            return origin
+        }
+        let maxX = max(visibleFrame.minX, visibleFrame.maxX - size.width)
+        let maxY = max(visibleFrame.minY, visibleFrame.maxY - size.height)
+        return NSPoint(
+            x: min(max(origin.x, visibleFrame.minX), maxX),
+            y: min(max(origin.y, visibleFrame.minY), maxY)
+        )
+    }
+}
+
 final class SettingsWindowController: NSWindowController, NSWindowDelegate {
     static let shared = SettingsWindowController()
+    private static let positionKey = "settingsWindowOrigin"
+
     private let hosting: NSHostingController<AnyView>
     private var sizeObserver: NSKeyValueObservation?
 
@@ -1008,6 +1103,7 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
         win.center()
         win.hidesOnDeactivate = false
         win.collectionBehavior = [.moveToActiveSpace]
+        AuxiliaryWindowCoordinator.registerSettingsWindow(win)
         super.init(window: win)
         win.delegate = self
         sizeObserver = hosting.observe(\.preferredContentSize, options: [.new]) { [weak self] _, change in
@@ -1024,16 +1120,36 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
         NSApp.setActivationPolicy(.regular)
         DispatchQueue.main.async { [weak self] in
             guard let self else { return }
-            window?.center()
+            let shouldCaptureSettingsSnapshot = !(window?.isVisible ?? false)
+            if let window {
+                AuxiliaryWindowPositionStore.restoreOrigin(for: window, key: Self.positionKey)
+            }
             showWindow(nil)
-            window?.makeKeyAndOrderFront(nil)
-            NSApp.activate(ignoringOtherApps: true)
+            if let window {
+                if shouldCaptureSettingsSnapshot {
+                    NotificationCenter.default.post(name: .settingsWindowDidOpen, object: window)
+                }
+                AuxiliaryWindowCoordinator.present(window)
+            }
         }
     }
 
+    func windowDidMove(_ notification: Notification) {
+        guard let window else { return }
+        AuxiliaryWindowPositionStore.saveOrigin(of: window, key: Self.positionKey)
+    }
+
     func windowWillClose(_ notification: Notification) {
+        guard let window else { return }
+        NotificationCenter.default.post(name: .settingsWindowWillClose, object: window)
+        AuxiliaryWindowPositionStore.saveOrigin(of: window, key: Self.positionKey)
+        AuxiliaryWindowCoordinator.auxiliaryWindowWillClose(window)
+    }
+
+    func windowDidBecomeKey(_ notification: Notification) {
+        guard let window else { return }
         DispatchQueue.main.async {
-            NSApp.setActivationPolicy(.accessory)
+            AuxiliaryWindowPositionStore.restoreOrigin(for: window, key: Self.positionKey)
         }
     }
 
@@ -1049,8 +1165,8 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
 
 final class SettingsPanel: NSPanel {
     override func cancelOperation(_ sender: Any?) {
-        // Escape should not close the Settings window. Inline editors handle
-        // their own Escape behavior before the command reaches the panel.
+        NotificationCenter.default.post(name: .settingsWindowWillCancel, object: self)
+        close()
     }
 }
 
@@ -1058,6 +1174,7 @@ final class SettingsPanel: NSPanel {
 
 final class LogWindowController: NSWindowController, NSWindowDelegate {
     static let shared = LogWindowController()
+    private static let positionKey = "logWindowOrigin"
 
     private init() {
         let hosting = NSHostingController(
@@ -1075,6 +1192,7 @@ final class LogWindowController: NSWindowController, NSWindowDelegate {
         win.center()
         win.hidesOnDeactivate = false
         win.collectionBehavior = [.moveToActiveSpace]
+        AuxiliaryWindowCoordinator.registerLogWindow(win)
         super.init(window: win)
         win.delegate = self
     }
@@ -1086,16 +1204,24 @@ final class LogWindowController: NSWindowController, NSWindowDelegate {
         NSApp.setActivationPolicy(.regular)
         DispatchQueue.main.async { [weak self] in
             guard let self else { return }
-            window?.center()
+            if let window {
+                AuxiliaryWindowPositionStore.restoreOrigin(for: window, key: Self.positionKey)
+            }
             showWindow(nil)
-            window?.makeKeyAndOrderFront(nil)
-            NSApp.activate(ignoringOtherApps: true)
+            if let window {
+                AuxiliaryWindowCoordinator.present(window)
+            }
         }
     }
 
+    func windowDidMove(_ notification: Notification) {
+        guard let window else { return }
+        AuxiliaryWindowPositionStore.saveOrigin(of: window, key: Self.positionKey)
+    }
+
     func windowWillClose(_ notification: Notification) {
-        DispatchQueue.main.async {
-            NSApp.setActivationPolicy(.accessory)
-        }
+        guard let window else { return }
+        AuxiliaryWindowPositionStore.saveOrigin(of: window, key: Self.positionKey)
+        AuxiliaryWindowCoordinator.auxiliaryWindowWillClose(window)
     }
 }

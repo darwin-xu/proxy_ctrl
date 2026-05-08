@@ -67,6 +67,7 @@ class ProxyManager: ObservableObject {
     /// Hook for testing; when non-nil, called instead of spawning real processes.
     var runWithAuthHandler: ((_ commands: [[String]], _ completion: @escaping () -> Void) -> Void)?
     var privilegedCommandHandler: ((_ arguments: [String]) -> CommandResult)?
+    var readCommandHandler: ((_ executablePath: String, _ args: [String]) -> String)?
 
     // MARK: - Pure helpers (testable)
 
@@ -94,6 +95,25 @@ class ProxyManager: ObservableObject {
         }
         let data = try handle.readToEnd() ?? Data()
         return String(data: data, encoding: .utf8) ?? String(decoding: data, as: UTF8.self)
+    }
+
+    nonisolated static func launchctlOutputIndicatesRunning(_ output: String) -> Bool {
+        output.range(
+            of: #"(?m)^\s*state\s*=\s*running\s*$"#,
+            options: .regularExpression
+        ) != nil ||
+        output.range(
+            of: #"(?m)^\s*(pid|\"PID\")\s*=\s*[1-9][0-9]*\s*;?\s*$"#,
+            options: .regularExpression
+        ) != nil
+    }
+
+    nonisolated static func normalizedConfigPath(_ path: String, relativeTo basePath: String? = nil) -> String {
+        var expanded = NSString(string: path).expandingTildeInPath
+        if !expanded.hasPrefix("/"), let basePath {
+            expanded = URL(fileURLWithPath: basePath).appendingPathComponent(expanded).path
+        }
+        return URL(fileURLWithPath: expanded).standardizedFileURL.path
     }
 
     private var networkService: String {
@@ -138,7 +158,6 @@ class ProxyManager: ObservableObject {
            let saved = try? JSONDecoder().decode([TunConfig].self, from: data) {
             tunConfigs = saved
         }
-        refreshCurrentMode()
     }
 
     /// Testing-only initializer that skips side effects.
@@ -347,9 +366,19 @@ class ProxyManager: ObservableObject {
         let svc = networkService
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
             guard let self else { return }
+            if self.isSingBoxServiceRunning() {
+                let activeConfig = self.activeTunConfigFromConfigLink()
+                DispatchQueue.main.async {
+                    self.activeTunConfig = activeConfig
+                    self.currentMode = .tun
+                }
+                return
+            }
+
             let httpOut  = self.readCommand(["-getwebproxy",          svc])
             let socksOut = self.readCommand(["-getsocksfirewallproxy", svc])
             DispatchQueue.main.async {
+                self.activeTunConfig = nil
                 if httpOut.contains("Enabled: Yes") {
                     self.currentMode = .http
                 } else if socksOut.contains("Enabled: Yes") {
@@ -365,6 +394,30 @@ class ProxyManager: ObservableObject {
 
     private func runLaunchctl(_ action: String) -> CommandResult {
         runPrivilegedCommand([launchctlPath, action, singBoxServiceLabel])
+    }
+
+    private func isSingBoxServiceRunning() -> Bool {
+        let printResult = runPrivilegedCommand([launchctlPath, "print", "system/\(singBoxServiceLabel)"])
+        if printResult.succeeded {
+            return Self.launchctlOutputIndicatesRunning(printResult.output)
+        }
+
+        let listResult = runPrivilegedCommand([launchctlPath, "list", singBoxServiceLabel])
+        guard listResult.succeeded else { return false }
+        return Self.launchctlOutputIndicatesRunning(listResult.output)
+    }
+
+    private func activeTunConfigFromConfigLink() -> TunConfig? {
+        let linkPath = singBoxConfigLinkPath
+        guard let linkedPath = try? FileManager.default.destinationOfSymbolicLink(atPath: linkPath) else {
+            return nil
+        }
+
+        let linkDirectory = URL(fileURLWithPath: linkPath).deletingLastPathComponent().path
+        let normalizedLinkedPath = Self.normalizedConfigPath(linkedPath, relativeTo: linkDirectory)
+        return tunConfigs.first {
+            Self.normalizedConfigPath($0.path) == normalizedLinkedPath
+        }
     }
 
     private func runPrivilegedCommand(_ arguments: [String]) -> CommandResult {
@@ -436,6 +489,10 @@ class ProxyManager: ObservableObject {
     }
 
     func readCommand(at executablePath: String, args: [String]) -> String {
+        if let handler = readCommandHandler {
+            return handler(executablePath, args)
+        }
+
         let proc = Process()
         proc.executableURL = URL(fileURLWithPath: executablePath)
         proc.arguments = args

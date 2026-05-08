@@ -6,6 +6,7 @@
 //
 
 import AppKit
+import Combine
 import SwiftUI
 import UniformTypeIdentifiers
 
@@ -13,6 +14,8 @@ import UniformTypeIdentifiers
 
 struct LogView: View {
     @EnvironmentObject var proxy: ProxyManager
+    @AppStorage("logFollowLatest") private var followLatest = true
+    private let refreshTimer = Timer.publish(every: 1.0, on: .main, in: .common).autoconnect()
 
     var body: some View {
         VStack(spacing: 0) {
@@ -21,23 +24,10 @@ struct LogView: View {
                     .foregroundColor(.secondary)
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
             } else {
-                ScrollViewReader { reader in
-                    ScrollView {
-                        LazyVStack(alignment: .leading, spacing: 0) {
-                            ForEach(Array(proxy.tunLogLines.enumerated()), id: \.offset) { _, line in
-                                Text(line)
-                                    .font(.system(.caption, design: .monospaced))
-                            }
-                        }
-                        .textSelection(.enabled)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                        .padding()
-                        Color.clear.frame(height: 0).id("bottom")
-                    }
-                    .onChange(of: proxy.tunLogLines.count) {
-                        reader.scrollTo("bottom", anchor: .bottom)
-                    }
-                }
+                SelectableLogTextView(
+                    text: proxy.tunLogLines.joined(separator: "\n"),
+                    followLatest: followLatest
+                )
             }
             Divider()
             HStack {
@@ -50,9 +40,8 @@ struct LogView: View {
                     .font(.caption)
                     .foregroundColor(.secondary)
                 Spacer()
-                Button("Reload") {
-                    proxy.reloadTunLogFromFile()
-                }
+                Toggle("Follow latest", isOn: $followLatest)
+                    .toggleStyle(.checkbox)
                 Button("Copy All") {
                     NSPasteboard.general.clearContents()
                     NSPasteboard.general.setString(
@@ -65,6 +54,91 @@ struct LogView: View {
             }
         }
         .frame(width: 640, height: 420)
+        .onReceive(refreshTimer) { _ in
+            proxy.reloadTunLogFromFile()
+        }
+    }
+}
+
+private struct SelectableLogTextView: NSViewRepresentable {
+    let text: String
+    let followLatest: Bool
+
+    func makeCoordinator() -> Coordinator {
+        Coordinator()
+    }
+
+    func makeNSView(context: Context) -> NSScrollView {
+        let scrollView = NSScrollView()
+        scrollView.hasVerticalScroller = true
+        scrollView.hasHorizontalScroller = true
+        scrollView.autohidesScrollers = true
+        scrollView.borderType = .noBorder
+        scrollView.drawsBackground = false
+
+        let textView = NSTextView()
+        textView.isEditable = false
+        textView.isSelectable = true
+        textView.isRichText = false
+        textView.importsGraphics = false
+        textView.allowsUndo = false
+        textView.drawsBackground = false
+        textView.textColor = .labelColor
+        textView.font = .monospacedSystemFont(ofSize: NSFont.smallSystemFontSize, weight: .regular)
+        textView.textContainerInset = NSSize(width: 12, height: 12)
+        textView.minSize = NSSize(width: 0, height: 0)
+        textView.maxSize = NSSize(width: CGFloat.greatestFiniteMagnitude, height: CGFloat.greatestFiniteMagnitude)
+        textView.isVerticallyResizable = true
+        textView.isHorizontallyResizable = true
+        textView.autoresizingMask = [.width]
+        textView.textContainer?.containerSize = NSSize(
+            width: CGFloat.greatestFiniteMagnitude,
+            height: CGFloat.greatestFiniteMagnitude
+        )
+        textView.textContainer?.widthTracksTextView = false
+
+        scrollView.documentView = textView
+        context.coordinator.textView = textView
+        return scrollView
+    }
+
+    func updateNSView(_ scrollView: NSScrollView, context: Context) {
+        guard let textView = context.coordinator.textView else { return }
+
+        if textView.string != text {
+            let selectedRange = textView.selectedRange()
+            textView.string = text
+            textView.font = .monospacedSystemFont(ofSize: NSFont.smallSystemFontSize, weight: .regular)
+            textView.textColor = .labelColor
+
+            if followLatest {
+                scrollToBottom(textView)
+            } else {
+                textView.setSelectedRange(clamped(selectedRange, in: textView.string))
+            }
+        } else if followLatest, context.coordinator.lastFollowLatest != followLatest {
+            scrollToBottom(textView)
+        }
+
+        context.coordinator.lastFollowLatest = followLatest
+    }
+
+    private func scrollToBottom(_ textView: NSTextView) {
+        let end = (textView.string as NSString).length
+        DispatchQueue.main.async {
+            textView.scrollRangeToVisible(NSRange(location: end, length: 0))
+        }
+    }
+
+    private func clamped(_ range: NSRange, in string: String) -> NSRange {
+        let length = (string as NSString).length
+        guard range.location <= length else { return NSRange(location: length, length: 0) }
+        return NSRange(location: range.location, length: min(range.length, length - range.location))
+    }
+
+    final class Coordinator {
+        weak var textView: NSTextView?
+        var lastFollowLatest = true
     }
 }
 
@@ -82,6 +156,7 @@ struct SettingsView: View {
     @State private var editingConfigID: UUID? = nil
     @State private var editingConfigName = ""
     @State private var pickingConfigID: UUID? = nil
+    @State private var settingsSnapshot: SettingsSnapshot? = nil
     @FocusState private var focusedConfigID: UUID?
     private let configNameColumnWidth: CGFloat = 120
     private let configActionColumnWidth: CGFloat = 20
@@ -197,6 +272,19 @@ struct SettingsView: View {
         }
         .frame(width: 540)
         .fixedSize(horizontal: false, vertical: true)
+        .onAppear {
+            captureSettingsSnapshot()
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .settingsWindowDidOpen)) { _ in
+            captureSettingsSnapshot()
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .settingsWindowWillCancel)) { _ in
+            restoreSettingsSnapshot()
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .settingsWindowWillClose)) { _ in
+            cancelPendingWindowEdits()
+            settingsSnapshot = nil
+        }
     }
 
     private func configRow(_ config: TunConfig) -> some View {
@@ -236,9 +324,6 @@ struct SettingsView: View {
                 .frame(width: configNameColumnWidth, height: configListRowHeight, alignment: .leading)
                 .onSubmit {
                     commitEditingName()
-                }
-                .onExitCommand {
-                    cancelEditingName()
                 }
         } else {
             Text(config.name)
@@ -308,5 +393,46 @@ struct SettingsView: View {
                 selectFocusedTextFieldContents(attempt: attempt + 1)
             }
         }
+    }
+
+    private func cancelPendingWindowEdits() {
+        cancelEditingName()
+        pickingConfigID = nil
+        showingConfigPicker = false
+    }
+
+    private func captureSettingsSnapshot() {
+        settingsSnapshot = SettingsSnapshot(
+            networkService: networkService,
+            httpHost: httpHost,
+            httpPort: httpPort,
+            socksHost: socksHost,
+            socksPort: socksPort,
+            tunConfigs: proxy.tunConfigs
+        )
+    }
+
+    private func restoreSettingsSnapshot() {
+        guard let settingsSnapshot else {
+            cancelPendingWindowEdits()
+            return
+        }
+        networkService = settingsSnapshot.networkService
+        httpHost = settingsSnapshot.httpHost
+        httpPort = settingsSnapshot.httpPort
+        socksHost = settingsSnapshot.socksHost
+        socksPort = settingsSnapshot.socksPort
+        proxy.tunConfigs = settingsSnapshot.tunConfigs
+        proxy.saveTunConfigs()
+        cancelPendingWindowEdits()
+    }
+
+    private struct SettingsSnapshot {
+        let networkService: String
+        let httpHost: String
+        let httpPort: String
+        let socksHost: String
+        let socksPort: String
+        let tunConfigs: [TunConfig]
     }
 }

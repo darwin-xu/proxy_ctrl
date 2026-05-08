@@ -561,6 +561,99 @@ struct ApplyTunServiceTests {
     }
 }
 
+// MARK: - startup sing-box status
+
+struct LaunchctlStatusParsingTests {
+    @Test func detectsRunningPrintOutput() {
+        let output = """
+        system/io.sing-box = {
+            state = running
+            pid = 123
+        }
+        """
+        #expect(ProxyManager.launchctlOutputIndicatesRunning(output))
+    }
+
+    @Test func detectsRunningListOutput() {
+        let output = """
+        {
+            "Label" = "io.sing-box";
+            "PID" = 123;
+        };
+        """
+        #expect(ProxyManager.launchctlOutputIndicatesRunning(output))
+    }
+
+    @Test func ignoresStoppedOutput() {
+        #expect(!ProxyManager.launchctlOutputIndicatesRunning("state = waiting\n"))
+        #expect(!ProxyManager.launchctlOutputIndicatesRunning(#""LastExitStatus" = 0;"#))
+    }
+}
+
+@MainActor
+struct StartupSingBoxStatusTests {
+    @Test func runningServiceWithKnownConfigLinkShowsTunConfig() async throws {
+        let directory = try makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let linkURL = directory.appendingPathComponent("config.json")
+        let configURL = directory.appendingPathComponent("saved.json")
+        try "{}".write(to: configURL, atomically: true, encoding: .utf8)
+        try FileManager.default.createSymbolicLink(atPath: linkURL.path, withDestinationPath: "saved.json")
+
+        let config = TunConfig(name: "saved", path: configURL.path)
+        let manager = makeProxyManagerForTesting(singBoxConfigLinkPath: linkURL.path)
+        manager.tunConfigs = [config]
+        manager.privilegedCommandHandler = { _ in
+            CommandResult(exitCode: 0, output: "state = running\npid = 123\n", errorOutput: "")
+        }
+        manager.readCommandHandler = { _, _ in "" }
+
+        manager.refreshCurrentMode()
+        try await Task.sleep(for: .milliseconds(250))
+
+        #expect(manager.currentMode == .tun)
+        #expect(manager.activeTunConfig?.id == config.id)
+    }
+
+    @Test func runningServiceWithUnknownConfigStillShowsTunChecked() async throws {
+        let directory = try makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let linkURL = directory.appendingPathComponent("missing-config.json")
+
+        let manager = makeProxyManagerForTesting(singBoxConfigLinkPath: linkURL.path)
+        manager.tunConfigs = [
+            TunConfig(name: "saved", path: directory.appendingPathComponent("saved.json").path)
+        ]
+        manager.privilegedCommandHandler = { _ in
+            CommandResult(exitCode: 0, output: "state = running\npid = 123\n", errorOutput: "")
+        }
+        manager.readCommandHandler = { _, _ in "Enabled: Yes\n" }
+
+        manager.refreshCurrentMode()
+        try await Task.sleep(for: .milliseconds(250))
+
+        #expect(manager.currentMode == .tun)
+        #expect(manager.activeTunConfig == nil)
+    }
+
+    @Test func stoppedServiceFallsBackToNetworksetupStatus() async throws {
+        let manager = makeProxyManagerForTesting()
+        manager.activeTunConfig = TunConfig(name: "old", path: "/old.json")
+        manager.privilegedCommandHandler = { _ in
+            CommandResult(exitCode: 0, output: "state = waiting\n", errorOutput: "")
+        }
+        manager.readCommandHandler = { _, args in
+            args.first == "-getwebproxy" ? "Enabled: Yes\n" : "Enabled: No\n"
+        }
+
+        manager.refreshCurrentMode()
+        try await Task.sleep(for: .milliseconds(250))
+
+        #expect(manager.currentMode == .http)
+        #expect(manager.activeTunConfig == nil)
+    }
+}
+
 // MARK: - Initial State
 
 @MainActor
