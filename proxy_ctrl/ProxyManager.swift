@@ -41,10 +41,6 @@ struct CommandResult: Equatable {
     }
 }
 
-private struct IPInfoResponse: Decodable {
-    let city: String?
-}
-
 class ProxyManager: ObservableObject {
     static let shared = ProxyManager()
 
@@ -128,8 +124,9 @@ class ProxyManager: ObservableObject {
 
     nonisolated static func parseConnectivityCity(from output: String) -> String? {
         guard let data = output.data(using: .utf8),
-              let response = try? JSONDecoder().decode(IPInfoResponse.self, from: data),
-              let city = response.city?.trimmingCharacters(in: .whitespacesAndNewlines),
+              let object = try? JSONSerialization.jsonObject(with: data),
+              let dictionary = object as? [String: Any],
+              let city = (dictionary["city"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines),
               !city.isEmpty else {
             return nil
         }
