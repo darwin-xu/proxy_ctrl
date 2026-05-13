@@ -23,6 +23,9 @@ DerivedData/
 timeline.xctimeline
 playground.xcworkspace
 
+# Local build/version stamps
+version/*.env
+
 # Swift Package Manager
 .build/
 .swiftpm/xcode/

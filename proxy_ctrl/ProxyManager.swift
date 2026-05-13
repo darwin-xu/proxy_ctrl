@@ -41,6 +41,10 @@ struct CommandResult: Equatable {
     }
 }
 
+private struct IPInfoResponse: Decodable {
+    let city: String?
+}
+
 class ProxyManager: ObservableObject {
     static let shared = ProxyManager()
 
@@ -48,6 +52,7 @@ class ProxyManager: ObservableObject {
     @Published var lastError: String? = nil
     @Published var tunLogLines: [String] = []
     @Published var tunLogByteCount: Int = 0
+    @Published var connectivityCity: String = "unknown"
 
     /// Overrides for testing; when non-nil, used instead of UserDefaults.
     var networkServiceOverride: String?
@@ -58,6 +63,7 @@ class ProxyManager: ObservableObject {
     var tunConfigPathOverride: String?  // retained for testing only
     var sudoPathOverride: String?
     var launchctlPathOverride: String?
+    var curlPathOverride: String?
     var singBoxServiceLabelOverride: String?
     var singBoxConfigLinkPathOverride: String?
     var singBoxLogPathOverride: String?
@@ -68,7 +74,10 @@ class ProxyManager: ObservableObject {
     var runWithAuthHandler: ((_ commands: [[String]], _ completion: @escaping () -> Void) -> Void)?
     var privilegedCommandHandler: ((_ arguments: [String]) -> CommandResult)?
     var readCommandHandler: ((_ executablePath: String, _ args: [String]) -> String)?
+    var connectivityCommandHandler: (() -> CommandResult)?
     private var tunLogSignature: LogFileSignature?
+    private var connectivityTimer: Timer?
+    private var isRefreshingConnectivity = false
 
     // MARK: - Pure helpers (testable)
 
@@ -117,6 +126,16 @@ class ProxyManager: ObservableObject {
         return URL(fileURLWithPath: expanded).standardizedFileURL.path
     }
 
+    nonisolated static func parseConnectivityCity(from output: String) -> String? {
+        guard let data = output.data(using: .utf8),
+              let response = try? JSONDecoder().decode(IPInfoResponse.self, from: data),
+              let city = response.city?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !city.isEmpty else {
+            return nil
+        }
+        return city
+    }
+
     private struct LogFileSignature: Equatable {
         let path: String
         let maxBytes: UInt64
@@ -144,6 +163,9 @@ class ProxyManager: ObservableObject {
     }
     private var launchctlPath: String {
         launchctlPathOverride ?? "/bin/launchctl"
+    }
+    private var curlPath: String {
+        curlPathOverride ?? "/usr/bin/curl"
     }
     private var singBoxConfigLinkPath: String {
         singBoxConfigLinkPathOverride ?? "/Users/darwin/projects/scripts/sing-box/config.json"
@@ -390,6 +412,35 @@ class ProxyManager: ObservableObject {
 
     // MARK: - State detection
 
+    func startConnectivityUpdates(interval: TimeInterval = 180) {
+        connectivityTimer?.invalidate()
+        refreshConnectivity()
+        let timer = Timer.scheduledTimer(withTimeInterval: interval, repeats: true) { [weak self] _ in
+            self?.refreshConnectivity()
+        }
+        timer.tolerance = min(30, max(1, interval * 0.1))
+        connectivityTimer = timer
+    }
+
+    func stopConnectivityUpdates() {
+        connectivityTimer?.invalidate()
+        connectivityTimer = nil
+    }
+
+    func refreshConnectivity() {
+        guard !isRefreshingConnectivity else { return }
+        isRefreshingConnectivity = true
+
+        DispatchQueue.global(qos: .utility).async { [weak self] in
+            guard let self else { return }
+            let city = self.fetchConnectivityCity()
+            DispatchQueue.main.async {
+                self.connectivityCity = city
+                self.isRefreshingConnectivity = false
+            }
+        }
+    }
+
     func refreshCurrentMode() {
         let svc = networkService
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
@@ -419,6 +470,46 @@ class ProxyManager: ObservableObject {
     }
 
     // MARK: - Execution helpers
+
+    private func fetchConnectivityCity() -> String {
+        let result: CommandResult
+        if let handler = connectivityCommandHandler {
+            result = handler()
+        } else {
+            result = runCurl(["-fsS", "--max-time", "10", "https://ipinfo.io/"])
+        }
+
+        guard result.succeeded,
+              let city = Self.parseConnectivityCity(from: result.output) else {
+            return "unknown"
+        }
+        return city
+    }
+
+    private func runCurl(_ arguments: [String]) -> CommandResult {
+        let proc = Process()
+        proc.executableURL = URL(fileURLWithPath: curlPath)
+        proc.arguments = arguments
+        let outPipe = Pipe()
+        let errPipe = Pipe()
+        proc.standardOutput = outPipe
+        proc.standardError = errPipe
+
+        do {
+            try proc.run()
+            proc.waitUntilExit()
+        } catch {
+            return CommandResult(
+                exitCode: 127,
+                output: "",
+                errorOutput: "exec failed: \(error.localizedDescription)"
+            )
+        }
+
+        let output = String(data: outPipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
+        let errorOutput = String(data: errPipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
+        return CommandResult(exitCode: proc.terminationStatus, output: output, errorOutput: errorOutput)
+    }
 
     private func runLaunchctl(_ action: String) -> CommandResult {
         runPrivilegedCommand([launchctlPath, action, singBoxServiceLabel])

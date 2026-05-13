@@ -44,6 +44,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func applicationWillTerminate(_ notification: Notification) {
+        ProxyManager.shared.stopConnectivityUpdates()
         AwakeController.shared.releaseForTermination()
     }
 }
@@ -62,6 +63,14 @@ final class ProxyStatusMenuController: NSObject {
     }
 
     func install() {
+        proxy.$connectivityCity
+            .removeDuplicates()
+            .receive(on: RunLoop.main)
+            .sink { [weak self] _ in
+                self?.updateStatusButton()
+                self?.rebuildMenu()
+            }
+            .store(in: &cancellables)
         Publishers.CombineLatest4(
             proxy.$currentMode.removeDuplicates(),
             proxy.$lastError.removeDuplicates(),
@@ -81,6 +90,7 @@ final class ProxyStatusMenuController: NSObject {
             }
             .store(in: &cancellables)
         proxy.refreshCurrentMode()
+        proxy.startConnectivityUpdates()
     }
 
     private func updateStatusButton() {
@@ -89,11 +99,11 @@ final class ProxyStatusMenuController: NSObject {
         if let image = NSImage(systemSymbolName: symbolName, accessibilityDescription: "Proxy") {
             image.isTemplate = true
             button.image = image
-            button.imagePosition = .imageOnly
-            button.title = ""
+            button.imagePosition = .imageLeading
+            button.title = " \(proxy.connectivityCity)"
         } else {
             button.image = nil
-            button.title = "Proxy"
+            button.title = "Proxy \(proxy.connectivityCity)"
         }
     }
 

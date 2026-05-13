@@ -86,6 +86,57 @@ struct ProxyModeTests {
     }
 }
 
+// MARK: - Connectivity
+
+@MainActor
+struct ConnectivityTests {
+    @Test func parsesCityFromIPInfoOutput() {
+        let output = """
+        {
+          "ip": "154.51.41.187",
+          "city": "Los Angeles",
+          "region": "California"
+        }
+        """
+
+        #expect(ProxyManager.parseConnectivityCity(from: output) == "Los Angeles")
+    }
+
+    @Test func invalidIPInfoOutputHasNoCity() {
+        #expect(ProxyManager.parseConnectivityCity(from: "{}") == nil)
+        #expect(ProxyManager.parseConnectivityCity(from: "not json") == nil)
+    }
+
+    @Test func refreshConnectivityStoresCity() async throws {
+        let manager = ProxyManager(forTesting: true)
+        manager.connectivityCommandHandler = {
+            CommandResult(
+                exitCode: 0,
+                output: #"{"city":"Los Angeles"}"#,
+                errorOutput: ""
+            )
+        }
+
+        manager.refreshConnectivity()
+        try await Task.sleep(for: .milliseconds(250))
+
+        #expect(manager.connectivityCity == "Los Angeles")
+    }
+
+    @Test func refreshConnectivityUsesUnknownOnFailure() async throws {
+        let manager = ProxyManager(forTesting: true)
+        manager.connectivityCity = "old"
+        manager.connectivityCommandHandler = {
+            CommandResult(exitCode: 1, output: "", errorOutput: "curl failed")
+        }
+
+        manager.refreshConnectivity()
+        try await Task.sleep(for: .milliseconds(250))
+
+        #expect(manager.connectivityCity == "unknown")
+    }
+}
+
 // MARK: - Awake Controller
 
 @MainActor

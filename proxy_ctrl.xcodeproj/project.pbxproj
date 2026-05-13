@@ -243,7 +243,6 @@
 			);
 			inputPaths = (
 				"$(SRCROOT)/scripts/update_build_version.sh",
-				"$(SRCROOT)/version/version.env",
 			);
 			name = "Update Build Version";
 			outputPaths = (
