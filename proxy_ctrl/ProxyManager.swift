@@ -49,6 +49,7 @@ class ProxyManager: ObservableObject {
     @Published var tunLogLines: [String] = []
     @Published var tunLogByteCount: Int = 0
     @Published var connectivityCity: String = "unknown"
+    @Published var tcpRTTDisplay: String = "TCP RTT: unknown"
 
     /// Overrides for testing; when non-nil, used instead of UserDefaults.
     var networkServiceOverride: String?
@@ -60,6 +61,7 @@ class ProxyManager: ObservableObject {
     var sudoPathOverride: String?
     var launchctlPathOverride: String?
     var curlPathOverride: String?
+    var ipinfoBearerTokenOverride: String?
     var singBoxServiceLabelOverride: String?
     var singBoxConfigLinkPathOverride: String?
     var singBoxLogPathOverride: String?
@@ -71,9 +73,16 @@ class ProxyManager: ObservableObject {
     var privilegedCommandHandler: ((_ arguments: [String]) -> CommandResult)?
     var readCommandHandler: ((_ executablePath: String, _ args: [String]) -> String)?
     var connectivityCommandHandler: (() -> CommandResult)?
+    var tcpRTTCommandHandler: (() -> CommandResult)?
     private var tunLogSignature: LogFileSignature?
     private var connectivityTimer: Timer?
+    private var modeChangeConnectivityTimers: [Timer] = []
+    private var connectivityRefreshInterval: TimeInterval = 180
+    private var connectivityRetryInterval: TimeInterval = 10
     private var isRefreshingConnectivity = false
+    private var isRefreshingTCPRTT = false
+    var refreshConnectivityOnModeChange = true
+    var modeChangeConnectivityFollowUpDelays: [TimeInterval] = [1, 3, 10]
 
     // MARK: - Pure helpers (testable)
 
@@ -123,14 +132,54 @@ class ProxyManager: ObservableObject {
     }
 
     nonisolated static func parseConnectivityCity(from output: String) -> String? {
-        guard let data = output.data(using: .utf8),
-              let object = try? JSONSerialization.jsonObject(with: data),
-              let dictionary = object as? [String: Any],
-              let city = (dictionary["city"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines),
-              !city.isEmpty else {
+        let trimmed = output.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return nil }
+
+        if let data = trimmed.data(using: .utf8),
+           let object = try? JSONSerialization.jsonObject(with: data),
+           let dictionary = object as? [String: Any],
+           let city = (dictionary["city"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines),
+           !city.isEmpty {
+            return city
+        }
+
+        if trimmed.hasPrefix("{") || trimmed.hasPrefix("[") {
             return nil
         }
-        return city
+
+        return trimmed
+    }
+
+    nonisolated static func connectivityCurlArguments(bearerToken: String) -> [String] {
+        ipinfoCurlArguments(
+            bearerToken: bearerToken,
+            additionalArguments: ["https://ipinfo.io/city"]
+        )
+    }
+
+    nonisolated static func tcpRTTCurlArguments() -> [String] {
+        ["-sS", "--max-time", "10", "-o", "/dev/null", "-w", "%{time_connect}", "https://ipinfo.io/city"]
+    }
+
+    private nonisolated static func ipinfoCurlArguments(
+        bearerToken: String,
+        additionalArguments: [String]
+    ) -> [String] {
+        let token = bearerToken.trimmingCharacters(in: .whitespacesAndNewlines)
+        var arguments = ["-fsS", "--max-time", "10"]
+        if !token.isEmpty {
+            arguments += ["-H", "Authorization: Bearer \(token)"]
+        }
+        arguments += additionalArguments
+        return arguments
+    }
+
+    nonisolated static func formatTCPRTT(seconds: Double) -> String? {
+        guard seconds >= 0, seconds.isFinite else { return nil }
+        if seconds < 1 {
+            return String(format: "TCP RTT: %.2f ms", locale: Locale(identifier: "en_US_POSIX"), seconds * 1000)
+        }
+        return String(format: "TCP RTT: %.2f s", locale: Locale(identifier: "en_US_POSIX"), seconds)
     }
 
     private struct LogFileSignature: Equatable {
@@ -164,6 +213,9 @@ class ProxyManager: ObservableObject {
     private var curlPath: String {
         curlPathOverride ?? "/usr/bin/curl"
     }
+    private var ipinfoBearerToken: String {
+        ipinfoBearerTokenOverride ?? (UserDefaults.standard.string(forKey: "ipinfoBearerToken") ?? "")
+    }
     private var singBoxConfigLinkPath: String {
         singBoxConfigLinkPathOverride ?? "/Users/darwin/projects/scripts/sing-box/config.json"
     }
@@ -180,6 +232,7 @@ class ProxyManager: ObservableObject {
             "httpPort": "8899",
             "socksHost": "192.168.2.201",
             "socksPort": "7788",
+            "ipinfoBearerToken": "",
         ])
         if let data = UserDefaults.standard.data(forKey: "tunConfigs"),
            let saved = try? JSONDecoder().decode([TunConfig].self, from: data) {
@@ -208,7 +261,7 @@ class ProxyManager: ObservableObject {
             ["-setsocksfirewallproxystate", svc, "off"],
         ]
         runWithAuth(cmds) {
-            self.currentMode = .http
+            self.setCurrentMode(.http)
             if self.lastError == nil {
                 self.lastError = stopError
             }
@@ -229,7 +282,7 @@ class ProxyManager: ObservableObject {
             ["-setsecurewebproxystate",     svc, "off"],
         ]
         runWithAuth(cmds) {
-            self.currentMode = .socks
+            self.setCurrentMode(.socks)
             if self.lastError == nil {
                 self.lastError = stopError
             }
@@ -248,7 +301,7 @@ class ProxyManager: ObservableObject {
             ["-setsocksfirewallproxystate", svc, "off"],
         ]
         runWithAuth(cmds) {
-            self.currentMode = .direct
+            self.setCurrentMode(.direct)
             if self.lastError == nil {
                 self.lastError = stopError
             }
@@ -291,11 +344,11 @@ class ProxyManager: ObservableObject {
         let result = runLaunchctl("start")
         if result.succeeded {
             activeTunConfig = activeConfig
-            currentMode = .tun
+            setCurrentMode(.tun)
             lastError = nil
         } else {
             activeTunConfig = nil
-            currentMode = .direct
+            setCurrentMode(.direct)
             lastError = "Failed to start sing-box service: \(result.failureMessage)"
         }
     }
@@ -400,7 +453,7 @@ class ProxyManager: ObservableObject {
         let result = runLaunchctl("stop")
         activeTunConfig = nil
         if currentMode == .tun {
-            currentMode = .direct
+            setCurrentMode(.direct)
         }
 
         guard !result.succeeded else { return nil }
@@ -409,23 +462,36 @@ class ProxyManager: ObservableObject {
 
     // MARK: - State detection
 
-    func startConnectivityUpdates(interval: TimeInterval = 180) {
-        connectivityTimer?.invalidate()
+    func startConnectivityUpdates(interval: TimeInterval = 600, retryInterval: TimeInterval = 10) {
+        connectivityRefreshInterval = interval
+        connectivityRetryInterval = retryInterval
+        scheduleConnectivityTimer(after: interval)
         refreshConnectivity()
-        let timer = Timer.scheduledTimer(withTimeInterval: interval, repeats: true) { [weak self] _ in
-            self?.refreshConnectivity()
-        }
-        timer.tolerance = min(30, max(1, interval * 0.1))
-        connectivityTimer = timer
     }
 
     func stopConnectivityUpdates() {
         connectivityTimer?.invalidate()
         connectivityTimer = nil
+        cancelModeChangeConnectivityTimers()
     }
 
-    func refreshConnectivity() {
-        guard !isRefreshingConnectivity else { return }
+    func refreshConnectivity(
+        showDetecting: Bool = false,
+        rescheduleTimer: Bool = true,
+        completion: ((String?) -> Void)? = nil
+    ) {
+        guard shouldFetchConnectivityCity else {
+            connectivityCity = ""
+            completion?("")
+            return
+        }
+        if showDetecting {
+            connectivityCity = "Detecting..."
+        }
+        guard !isRefreshingConnectivity else {
+            completion?(nil)
+            return
+        }
         isRefreshingConnectivity = true
 
         DispatchQueue.global(qos: .utility).async { [weak self] in
@@ -434,8 +500,68 @@ class ProxyManager: ObservableObject {
             DispatchQueue.main.async {
                 self.connectivityCity = city
                 self.isRefreshingConnectivity = false
+                if rescheduleTimer && self.connectivityTimer != nil {
+                    let interval = city == "unknown" ? self.connectivityRetryInterval : self.connectivityRefreshInterval
+                    self.scheduleConnectivityTimer(after: interval)
+                }
+                completion?(city)
             }
         }
+    }
+
+    func refreshTCPRTT() {
+        guard !isRefreshingTCPRTT else { return }
+        isRefreshingTCPRTT = true
+        tcpRTTDisplay = "TCP RTT: Detecting..."
+
+        DispatchQueue.global(qos: .utility).async { [weak self] in
+            guard let self else { return }
+            let display = self.fetchTCPRTTDisplay()
+            DispatchQueue.main.async {
+                self.tcpRTTDisplay = display
+                self.isRefreshingTCPRTT = false
+            }
+        }
+    }
+
+    private func setCurrentMode(_ mode: ProxyMode) {
+        let modeChanged = currentMode != mode
+        currentMode = mode
+        if modeChanged && refreshConnectivityOnModeChange {
+            refreshConnectivityForModeChange()
+        }
+    }
+
+    private func refreshConnectivityForModeChange() {
+        cancelModeChangeConnectivityTimers()
+        runModeChangeConnectivityCheck(at: 0)
+    }
+
+    private func runModeChangeConnectivityCheck(at index: Int) {
+        let isFinalCheck = index >= modeChangeConnectivityFollowUpDelays.count
+        refreshConnectivity(showDetecting: index == 0, rescheduleTimer: isFinalCheck) { [weak self] _ in
+            guard let self, !isFinalCheck else { return }
+            let delay = self.modeChangeConnectivityFollowUpDelays[index]
+            let timer = Timer.scheduledTimer(withTimeInterval: delay, repeats: false) { [weak self] _ in
+                self?.runModeChangeConnectivityCheck(at: index + 1)
+            }
+            timer.tolerance = min(3, max(0.25, delay * 0.1))
+            self.modeChangeConnectivityTimers.append(timer)
+        }
+    }
+
+    private func cancelModeChangeConnectivityTimers() {
+        modeChangeConnectivityTimers.forEach { $0.invalidate() }
+        modeChangeConnectivityTimers.removeAll()
+    }
+
+    private func scheduleConnectivityTimer(after interval: TimeInterval) {
+        connectivityTimer?.invalidate()
+        let timer = Timer.scheduledTimer(withTimeInterval: interval, repeats: false) { [weak self] _ in
+            self?.refreshConnectivity()
+        }
+        timer.tolerance = min(30, max(1, interval * 0.1))
+        connectivityTimer = timer
     }
 
     func refreshCurrentMode() {
@@ -446,7 +572,7 @@ class ProxyManager: ObservableObject {
                 let activeConfig = self.activeTunConfigFromConfigLink()
                 DispatchQueue.main.async {
                     self.activeTunConfig = activeConfig
-                    self.currentMode = .tun
+                    self.setCurrentMode(.tun)
                 }
                 return
             }
@@ -456,11 +582,11 @@ class ProxyManager: ObservableObject {
             DispatchQueue.main.async {
                 self.activeTunConfig = nil
                 if httpOut.contains("Enabled: Yes") {
-                    self.currentMode = .http
+                    self.setCurrentMode(.http)
                 } else if socksOut.contains("Enabled: Yes") {
-                    self.currentMode = .socks
+                    self.setCurrentMode(.socks)
                 } else {
-                    self.currentMode = .direct
+                    self.setCurrentMode(.direct)
                 }
             }
         }
@@ -473,7 +599,7 @@ class ProxyManager: ObservableObject {
         if let handler = connectivityCommandHandler {
             result = handler()
         } else {
-            result = runCurl(["-fsS", "--max-time", "10", "https://ipinfo.io/"])
+            result = runCurl(Self.connectivityCurlArguments(bearerToken: ipinfoBearerToken))
         }
 
         guard result.succeeded,
@@ -481,6 +607,27 @@ class ProxyManager: ObservableObject {
             return "unknown"
         }
         return city
+    }
+
+    private var shouldFetchConnectivityCity: Bool {
+        if connectivityCommandHandler != nil { return true }
+        return !ipinfoBearerToken.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
+
+    private func fetchTCPRTTDisplay() -> String {
+        let result: CommandResult
+        if let handler = tcpRTTCommandHandler {
+            result = handler()
+        } else {
+            result = runCurl(Self.tcpRTTCurlArguments())
+        }
+
+        let value = result.output.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let seconds = Double(value),
+              let display = Self.formatTCPRTT(seconds: seconds) else {
+            return "TCP RTT: unknown"
+        }
+        return display
     }
 
     private func runCurl(_ arguments: [String]) -> CommandResult {

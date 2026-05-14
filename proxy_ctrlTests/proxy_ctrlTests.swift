@@ -30,6 +30,7 @@ private func makeProxyManagerForTesting(
     manager.tunConfigPathOverride = tunConfigPath
     manager.singBoxConfigLinkPathOverride = singBoxConfigLinkPath
     manager.singBoxLogPathOverride = singBoxLogPath
+    manager.refreshConnectivityOnModeChange = false
     return manager
 }
 
@@ -104,7 +105,36 @@ struct ConnectivityTests {
 
     @Test func invalidIPInfoOutputHasNoCity() {
         #expect(ProxyManager.parseConnectivityCity(from: "{}") == nil)
-        #expect(ProxyManager.parseConnectivityCity(from: "not json") == nil)
+        #expect(ProxyManager.parseConnectivityCity(from: "") == nil)
+    }
+
+    @Test func parsesPlainIPInfoCityOutput() {
+        #expect(ProxyManager.parseConnectivityCity(from: "Los Angeles\n") == "Los Angeles")
+    }
+
+    @Test func buildsIPInfoCurlArgumentsWithOptionalBearer() {
+        #expect(ProxyManager.connectivityCurlArguments(bearerToken: "").contains("https://ipinfo.io/city"))
+        #expect(!ProxyManager.connectivityCurlArguments(bearerToken: "").contains("-H"))
+
+        let arguments = ProxyManager.connectivityCurlArguments(bearerToken: " test-token ")
+        #expect(arguments.contains("-H"))
+        #expect(arguments.contains("Authorization: Bearer test-token"))
+        #expect(arguments.contains("https://ipinfo.io/city"))
+    }
+
+    @Test func buildsTCPRTTCurlArgumentsWithoutBearer() {
+        let arguments = ProxyManager.tcpRTTCurlArguments()
+        #expect(arguments.contains("-w"))
+        #expect(arguments.contains("%{time_connect}"))
+        #expect(!arguments.contains("-f"))
+        #expect(!arguments.contains { $0.contains("Authorization: Bearer") })
+        #expect(arguments.contains("https://ipinfo.io/city"))
+    }
+
+    @Test func formatsTCPRTTDisplay() {
+        #expect(ProxyManager.formatTCPRTT(seconds: 0.03456) == "TCP RTT: 34.56 ms")
+        #expect(ProxyManager.formatTCPRTT(seconds: 1.23456) == "TCP RTT: 1.23 s")
+        #expect(ProxyManager.formatTCPRTT(seconds: -1) == nil)
     }
 
     @Test func refreshConnectivityStoresCity() async throws {
@@ -117,7 +147,7 @@ struct ConnectivityTests {
             )
         }
 
-        manager.refreshConnectivity()
+        manager.refreshConnectivity(showDetecting: false)
         try await Task.sleep(for: .milliseconds(250))
 
         #expect(manager.connectivityCity == "Los Angeles")
@@ -130,10 +160,133 @@ struct ConnectivityTests {
             CommandResult(exitCode: 1, output: "", errorOutput: "curl failed")
         }
 
-        manager.refreshConnectivity()
+        manager.refreshConnectivity(showDetecting: false)
         try await Task.sleep(for: .milliseconds(250))
 
         #expect(manager.connectivityCity == "unknown")
+    }
+
+    @Test func refreshConnectivityWithoutBearerClearsMenuCity() async throws {
+        let manager = ProxyManager(forTesting: true)
+        manager.connectivityCity = "old"
+        manager.ipinfoBearerTokenOverride = ""
+        manager.connectivityCommandHandler = nil
+
+        manager.refreshConnectivity(showDetecting: true)
+        try await Task.sleep(for: .milliseconds(250))
+
+        #expect(manager.connectivityCity == "")
+    }
+
+    @Test func modeChangeRefreshesConnectivity() async throws {
+        let manager = makeProxyManagerForTesting()
+        manager.refreshConnectivityOnModeChange = true
+        manager.modeChangeConnectivityFollowUpDelays = [60, 60]
+        manager.runWithAuthHandler = { _, completion in completion() }
+        manager.connectivityCommandHandler = {
+            CommandResult(exitCode: 0, output: #"{"city":"Tokyo"}"#, errorOutput: "")
+        }
+
+        manager.applyHTTP()
+        #expect(manager.connectivityCity == "Detecting...")
+        try await Task.sleep(for: .milliseconds(250))
+
+        #expect(manager.currentMode == .http)
+        #expect(manager.connectivityCity == "Tokyo")
+    }
+
+    @Test func modeChangeRunsThreeConnectivityChecks() async throws {
+        let manager = makeProxyManagerForTesting()
+        manager.refreshConnectivityOnModeChange = true
+        manager.modeChangeConnectivityFollowUpDelays = [0.05, 0.05]
+        manager.runWithAuthHandler = { _, completion in completion() }
+        let cities = ["Old Place", "Middle Place", "Final Place"]
+        var refreshCount = 0
+        manager.connectivityCommandHandler = {
+            let city = cities[min(refreshCount, cities.count - 1)]
+            refreshCount += 1
+            return CommandResult(exitCode: 0, output: #"{"city":"\#(city)"}"#, errorOutput: "")
+        }
+
+        manager.applyHTTP()
+        try await Task.sleep(for: .milliseconds(350))
+
+        #expect(refreshCount == 3)
+        #expect(manager.connectivityCity == "Final Place")
+    }
+
+    @Test func unchangedModeDoesNotRefreshConnectivity() async throws {
+        let manager = makeProxyManagerForTesting()
+        manager.currentMode = .http
+        manager.refreshConnectivityOnModeChange = true
+        manager.runWithAuthHandler = { _, completion in completion() }
+        var refreshCount = 0
+        manager.connectivityCommandHandler = {
+            refreshCount += 1
+            return CommandResult(exitCode: 0, output: #"{"city":"Tokyo"}"#, errorOutput: "")
+        }
+
+        manager.applyHTTP()
+        try await Task.sleep(for: .milliseconds(250))
+
+        #expect(refreshCount == 0)
+    }
+
+    @Test func unknownConnectivityRetriesSoonThenReturnsToNormalCadence() async throws {
+        let manager = ProxyManager(forTesting: true)
+        var refreshCount = 0
+        manager.connectivityCommandHandler = {
+            refreshCount += 1
+            if refreshCount == 1 {
+                return CommandResult(exitCode: 1, output: "", errorOutput: "curl failed")
+            }
+            return CommandResult(exitCode: 0, output: #"{"city":"Paris"}"#, errorOutput: "")
+        }
+
+        manager.startConnectivityUpdates(interval: 60, retryInterval: 0.05)
+        try await Task.sleep(for: .milliseconds(250))
+        manager.stopConnectivityUpdates()
+
+        #expect(refreshCount >= 2)
+        #expect(manager.connectivityCity == "Paris")
+    }
+
+    @Test func refreshTCPRTTStoresFormattedDisplay() async throws {
+        let manager = ProxyManager(forTesting: true)
+        manager.tcpRTTCommandHandler = {
+            CommandResult(exitCode: 0, output: "0.01234", errorOutput: "")
+        }
+
+        manager.refreshTCPRTT()
+        #expect(manager.tcpRTTDisplay == "TCP RTT: Detecting...")
+        try await Task.sleep(for: .milliseconds(250))
+
+        #expect(manager.tcpRTTDisplay == "TCP RTT: 12.34 ms")
+    }
+
+    @Test func refreshTCPRTTUsesUnknownOnFailure() async throws {
+        let manager = ProxyManager(forTesting: true)
+        manager.tcpRTTDisplay = "old"
+        manager.tcpRTTCommandHandler = {
+            CommandResult(exitCode: 1, output: "", errorOutput: "curl failed")
+        }
+
+        manager.refreshTCPRTT()
+        try await Task.sleep(for: .milliseconds(250))
+
+        #expect(manager.tcpRTTDisplay == "TCP RTT: unknown")
+    }
+
+    @Test func refreshTCPRTTUsesTimingFromHTTPFailure() async throws {
+        let manager = ProxyManager(forTesting: true)
+        manager.tcpRTTCommandHandler = {
+            CommandResult(exitCode: 22, output: "0.04567", errorOutput: "HTTP error")
+        }
+
+        manager.refreshTCPRTT()
+        try await Task.sleep(for: .milliseconds(250))
+
+        #expect(manager.tcpRTTDisplay == "TCP RTT: 45.67 ms")
     }
 }
 

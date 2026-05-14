@@ -55,6 +55,7 @@ final class ProxyStatusMenuController: NSObject {
     private let statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
     private var cancellables = Set<AnyCancellable>()
     private var activeTimeDialog: TimeSelectionWindowController?
+    private weak var tcpRTTMenuItem: NSMenuItem?
 
     init(proxy: ProxyManager, awakeController: AwakeController) {
         self.proxy = proxy
@@ -69,6 +70,13 @@ final class ProxyStatusMenuController: NSObject {
             .sink { [weak self] _ in
                 self?.updateStatusButton()
                 self?.rebuildMenu()
+            }
+            .store(in: &cancellables)
+        proxy.$tcpRTTDisplay
+            .removeDuplicates()
+            .receive(on: RunLoop.main)
+            .sink { [weak self] _ in
+                self?.tcpRTTMenuItem?.title = self?.proxy.tcpRTTDisplay ?? "TCP RTT: unknown"
             }
             .store(in: &cancellables)
         Publishers.CombineLatest4(
@@ -100,32 +108,33 @@ final class ProxyStatusMenuController: NSObject {
             image.isTemplate = true
             button.image = image
             button.imagePosition = .imageLeading
-            button.title = " \(proxy.connectivityCity)"
+            button.title = proxy.connectivityCity.isEmpty ? "" : " \(proxy.connectivityCity)"
         } else {
             button.image = nil
-            button.title = "Proxy \(proxy.connectivityCity)"
+            button.title = proxy.connectivityCity.isEmpty ? "Proxy" : "Proxy \(proxy.connectivityCity)"
         }
     }
 
     private func rebuildMenu() {
         let menu = NSMenu()
         menu.autoenablesItems = false
+        menu.delegate = self
 
         menu.addItem(proxyItem(
-            title: "http",
+            title: "HTTP",
             mode: .http,
             action: #selector(selectHTTP(_:)),
             symbolNames: ["arrow.triangle.branch", "globe"]
         ))
         menu.addItem(proxyItem(
-            title: "socks",
+            title: "SOCKS",
             mode: .socks,
             action: #selector(selectSOCKS(_:)),
             symbolNames: ["poweroutlet.type.a", "cable.connector.horizontal", "powerplug", "network"]
         ))
         menu.addItem(tunMenuItem())
         menu.addItem(proxyItem(
-            title: "direct",
+            title: "Direct",
             mode: .direct,
             action: #selector(selectDirect(_:)),
             symbolNames: ["arrow.right"]
@@ -142,6 +151,8 @@ final class ProxyStatusMenuController: NSObject {
             menu.addItem(errorItem(message: error))
         }
 
+        menu.addItem(.separator())
+        menu.addItem(tcpRTTItem())
         menu.addItem(.separator())
         menu.addItem(NSMenuItem(
             title: "Settings…",
@@ -227,11 +238,11 @@ final class ProxyStatusMenuController: NSObject {
     }
 
     private func tunMenuItem() -> NSMenuItem {
-        let item = NSMenuItem(title: "tun", action: nil, keyEquivalent: "")
+        let item = NSMenuItem(title: "TUN", action: nil, keyEquivalent: "")
         item.state = proxy.currentMode == .tun ? .on : .off
         item.setSymbolImage(named: ["tram.fill.tunnel", "pipe.and.drop", "network.badge.shield.half.filled", "network"])
 
-        let submenu = NSMenu(title: "tun")
+        let submenu = NSMenu(title: "TUN")
         submenu.autoenablesItems = false
         if proxy.tunConfigs.isEmpty {
             let empty = NSMenuItem(title: "No configs - add one in Settings", action: nil, keyEquivalent: "")
@@ -252,6 +263,14 @@ final class ProxyStatusMenuController: NSObject {
             }
         }
         item.submenu = submenu
+        return item
+    }
+
+    private func tcpRTTItem() -> NSMenuItem {
+        let item = NSMenuItem(title: proxy.tcpRTTDisplay, action: nil, keyEquivalent: "")
+        item.isEnabled = false
+        item.setSymbolImage(named: ["speedometer"])
+        tcpRTTMenuItem = item
         return item
     }
 
@@ -450,6 +469,12 @@ final class ProxyStatusMenuController: NSObject {
         set {
             UserDefaults.standard.set(min(max(newValue, 0), 23 * 60 + 59), forKey: untilClockMinutesKey)
         }
+    }
+}
+
+extension ProxyStatusMenuController: NSMenuDelegate {
+    func menuWillOpen(_ menu: NSMenu) {
+        proxy.refreshTCPRTT()
     }
 }
 

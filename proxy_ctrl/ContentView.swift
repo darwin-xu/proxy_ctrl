@@ -147,6 +147,7 @@ struct SettingsView: View {
     @AppStorage("httpPort")       private var httpPort       = "8899"
     @AppStorage("socksHost")      private var socksHost      = "192.168.2.201"
     @AppStorage("socksPort")      private var socksPort      = "7788"
+    @AppStorage("ipinfoBearerToken") private var ipinfoBearerToken = ""
     @State private var showingConfigPicker = false
     @State private var selectedConfigID: UUID? = nil
     @State private var editingConfigID: UUID? = nil
@@ -190,6 +191,13 @@ struct SettingsView: View {
                         TextField("port", text: $socksPort)
                             .textFieldStyle(.roundedBorder)
                             .frame(maxWidth: 80)
+                    }
+                }
+                Section("Connectivity") {
+                    LabeledContent("ipinfo Bearer") {
+                        SecureField("optional token", text: $ipinfoBearerToken)
+                            .textFieldStyle(.roundedBorder)
+                            .frame(maxWidth: 260)
                     }
                 }
                 Section("sing-box Configs") {
@@ -404,6 +412,7 @@ struct SettingsView: View {
             httpPort: httpPort,
             socksHost: socksHost,
             socksPort: socksPort,
+            ipinfoBearerToken: ipinfoBearerToken,
             tunConfigs: proxy.tunConfigs
         )
     }
@@ -418,6 +427,7 @@ struct SettingsView: View {
         httpPort = settingsSnapshot.httpPort
         socksHost = settingsSnapshot.socksHost
         socksPort = settingsSnapshot.socksPort
+        ipinfoBearerToken = settingsSnapshot.ipinfoBearerToken
         proxy.tunConfigs = settingsSnapshot.tunConfigs
         proxy.saveTunConfigs()
         cancelPendingWindowEdits()
@@ -429,6 +439,7 @@ struct SettingsView: View {
         let httpPort: String
         let socksHost: String
         let socksPort: String
+        let ipinfoBearerToken: String
         let tunConfigs: [TunConfig]
     }
 }
